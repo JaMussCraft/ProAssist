@@ -1,0 +1,115 @@
+Model: 20240816-L4096-I5-ep4-NOSEP-nr0.2-1s-lora-bs256
+  offline   || dialog-sum_val_L4096_I5   || notalk0.5-maxlen_4k     : all-dialogs  diff: 8.192  bleu: nan
+  offline   || dialog_val_L0_I5          || notalk0.5-maxlen_32k    : all-dialogs  diff: 9.058  bleu: nan
+  offline   || narration_val_L131072_I5  || notalk0.5-maxlen_32k    : ego4d        diff: 7.391  bleu: nan
+  offline   || narration_val_L4096_I5    || notalk0.5-maxlen_4k     : sthsthv2     diff: 1.819  bleu: nan
+Model: 20240816-L4096-I10-ep4-NOSEP-nr0.2-1s-lora-bs512
+  offline   || dialog-sum_val_L4096_I10  || notalk0.5-maxlen_4k     : all-dialogs  diff: 7.664  bleu: nan
+  offline   || dialog_val_L0_I1          || notalk0.5-maxlen_128k   : ego4d        diff: 20.162  bleu: nan
+  offline   || dialog_val_L0_I10         || notalk0.5-maxlen_32k    : all-dialogs  diff: 9.378  bleu: nan
+  offline   || narration_val_L131072_I10 || notalk0.5-maxlen_32k    : ego4d        diff: 8.353  bleu: nan
+  offline   || narration_val_L4096_I10   || notalk0.5-maxlen_4k     : sthsthv2     diff: 1.896  bleu: nan
+Model: 20240816-L4096-I1-ep4-NOSEP-nr1.0-1s-lora-bs256
+  offline   || dialog-sum_val_L4096_I1   || notalk0.5-maxlen_4k     : all-dialogs  diff: 7.924  bleu: nan
+  offline   || dialog_val_L0_I1          || notalk0.5-maxlen_128k   : all-dialogs  diff: 8.213  bleu: nan
+  offline   || narration_val_L131072_I1  || notalk0.5-maxlen_128k   : ego4d        diff: 5.508  bleu: nan
+  offline   || narration_val_L131072_I1  || notalk0.7-maxlen_128k   : ego4d        diff: 6.029  bleu: nan
+  offline   || narration_val_L131072_I1  || notalk0.8-maxlen_128k   : ego4d        diff: 7.520  bleu: nan
+  offline   || narration_val_L4096_I1    || notalk0.5-maxlen_4k     : ego4d sthsthv2 diff: 3.341  bleu: nan
+  stream    || dialog_val_L0_I1          || notalk0.5-maxlen_128k   : ego4d        AP: nan  AR: nan  Avg-F1: nan  JI: nan  bleu4: 0.133  num_m: nan
+  stream    || narration_val_L4096_I1    || notalk0.2-maxlen_4k     : ego4d        AP: 0.250  AR: 0.000  Avg-F1: 0.000  JI: 0.000  bleu4: 0.000  num_m: 2.000
+  stream    || narration_val_L4096_I1    || notalk0.3-maxlen_4k     : ego4d        AP: 0.558  AR: 0.001  Avg-F1: 0.003  JI: 0.002  bleu4: 0.227  num_m: 19.000
+  stream    || narration_val_L4096_I1    || notalk0.4-maxlen_4k     : ego4d        AP: 0.487  AR: 0.009  Avg-F1: 0.017  JI: 0.016  bleu4: 0.224  num_m: 134.000
+  stream    || narration_val_L4096_I1    || notalk0.5-maxlen_4k     : ego4d        AP: 0.269  AR: 0.030  Avg-F1: 0.054  JI: 0.059  bleu4: 0.161  num_m: 498.000
+  stream    || narration_val_L4096_I1    || notalk0.6-maxlen_4k     : ego4d        AP: 0.199  AR: 0.098  Avg-F1: 0.131  JI: 0.185  bleu4: 0.120  num_m: 1813.000
+  stream    || narration_val_L4096_I1    || notalk0.7-maxlen_4k     : ego4d        AP: 0.094  AR: 0.261  Avg-F1: 0.138  JI: 0.196  bleu4: 0.141  num_m: 4924.000
+  stream    || narration_val_L4096_I1    || notalk0.8-maxlen_4k     : ego4d        AP: 0.056  AR: 0.344  Avg-F1: 0.096  JI: 0.142  bleu4: 0.128  num_m: 6736.000
+  stream    || narration_val_L4096_I1    || notalk0.9-maxlen_4k     : ego4d        AP: 0.041  AR: 0.364  Avg-F1: 0.074  JI: 0.113  bleu4: 0.121  num_m: 7304.000
+Model: 20240816-L4096-I1-ep4-NOSEP-nr0.2-1s-lora-bs256
+  offline   || dialog-sum_val_L4096_I1   || notalk0.5-maxlen_4k     : all-dialogs  diff: 7.677  bleu: nan
+  offline   || dialog_val_L0_I1          || notalk0.5-maxlen_128k   : all-dialogs  diff: 8.215  bleu: nan
+  offline   || dialog_val_L0_I1          || notalk0.5-maxlen_32k    : all-dialogs  diff: 8.215  bleu: nan
+  offline   || narration_val_L131072_I1  || notalk0.5-maxlen_128k   : ego4d        diff: 7.168  bleu: nan
+  offline   || narration_val_L131072_I1  || notalk0.5-maxlen_32k    : ego4d        diff: 7.168  bleu: nan
+  offline   || narration_val_L4096_I1    || notalk0.5-maxlen_4k     : sthsthv2     diff: 2.033  bleu: nan
+  stream    || dialog_val_L0_I1          || notalk0.5-maxlen_4k     : all-dialogs  AP: nan  AR: nan  Avg-F1: nan  JI: 0.310  bleu4: 0.115  num_m: nan
+  stream    || narration_val_L4096_I1    || notalk0.2-maxlen_4k     : ego4d        AP: 0.404  AR: 0.029  Avg-F1: 0.054  JI: 0.063  bleu4: 0.110  num_m: 511.000
+  stream    || narration_val_L4096_I1    || notalk0.3-maxlen_4k     : ego4d        AP: 0.266  AR: 0.191  Avg-F1: 0.223  JI: 0.360  bleu4: 0.137  num_m: 3555.000
+  stream    || narration_val_L4096_I1    || notalk0.4-maxlen_4k     : ego4d        AP: 0.115  AR: 0.330  Avg-F1: 0.171  JI: 0.267  bleu4: 0.128  num_m: 6327.000
+  stream    || narration_val_L4096_I1    || notalk0.5-maxlen_4k     : ego4d        AP: 0.073  AR: 0.358  Avg-F1: 0.121  JI: 0.174  bleu4: 0.137  num_m: 6778.000
+  stream    || narration_val_L4096_I1    || notalk0.6-maxlen_4k     : ego4d        AP: 0.055  AR: 0.388  Avg-F1: 0.097  JI: 0.140  bleu4: 0.137  num_m: 7389.000
+  stream    || narration_val_L4096_I1    || notalk0.7-maxlen_4k     : ego4d        AP: 0.045  AR: 0.390  Avg-F1: 0.081  JI: 0.116  bleu4: 0.120  num_m: 7509.000
+  stream    || narration_val_L4096_I1    || notalk0.8-maxlen_4k     : ego4d        AP: 0.039  AR: 0.371  Avg-F1: 0.070  JI: 0.105  bleu4: 0.124  num_m: 7316.000
+  stream    || narration_val_L4096_I1    || notalk0.9-maxlen_4k     : ego4d        AP: 0.037  AR: 0.361  Avg-F1: 0.067  JI: 0.103  bleu4: 0.116  num_m: 7280.000
+Model: 20240818-L4096-I1-ep4-NOSEP-nr1.0-w2t_head_w0.2-1s-lora-bs256
+  stream    || narration_val_L4096_I1    || notalk0.2-maxlen_4k     : ego4d        AP: nan  AR: nan  Avg-F1: nan  JI: 0.243  bleu4: 0.146  num_m: nan
+  stream    || narration_val_L4096_I1    || notalk0.3-maxlen_4k     : ego4d        AP: nan  AR: nan  Avg-F1: nan  JI: 0.295  bleu4: 0.127  num_m: nan
+  stream    || narration_val_L4096_I1    || notalk0.4-maxlen_4k     : ego4d        AP: nan  AR: nan  Avg-F1: nan  JI: 0.218  bleu4: 0.100  num_m: nan
+  stream    || narration_val_L4096_I1    || notalk0.5-maxlen_4k     : ego4d        AP: nan  AR: nan  Avg-F1: nan  JI: 0.164  bleu4: 0.090  num_m: nan
+  stream    || narration_val_L4096_I1    || notalk0.6-maxlen_4k     : ego4d        AP: nan  AR: nan  Avg-F1: nan  JI: 0.132  bleu4: 0.089  num_m: nan
+  stream    || narration_val_L4096_I1    || notalk0.7-maxlen_4k     : ego4d        AP: nan  AR: nan  Avg-F1: nan  JI: 0.114  bleu4: 0.084  num_m: nan
+  stream    || narration_val_L4096_I1    || notalk0.8-maxlen_4k     : ego4d        AP: nan  AR: nan  Avg-F1: nan  JI: 0.107  bleu4: 0.089  num_m: nan
+  stream    || narration_val_L4096_I1    || notalk0.9-maxlen_4k     : ego4d        AP: nan  AR: nan  Avg-F1: nan  JI: 0.103  bleu4: 0.078  num_m: nan
+Model: 20240818-L4096-I1-ep4-NOSEP-nr1.0-w2t_head_w0.5-1s-lora-bs256
+  stream    || narration_val_L4096_I1    || notalk0.2-maxlen_4k     : ego4d        AP: nan  AR: nan  Avg-F1: nan  JI: 0.067  bleu4: 0.000  num_m: nan
+  stream    || narration_val_L4096_I1    || notalk0.3-maxlen_4k     : ego4d        AP: nan  AR: nan  Avg-F1: nan  JI: 0.107  bleu4: 0.000  num_m: nan
+  stream    || narration_val_L4096_I1    || notalk0.4-maxlen_4k     : ego4d        AP: nan  AR: nan  Avg-F1: nan  JI: 0.117  bleu4: 0.000  num_m: nan
+  stream    || narration_val_L4096_I1    || notalk0.5-maxlen_4k     : ego4d        AP: nan  AR: nan  Avg-F1: nan  JI: 0.099  bleu4: 0.000  num_m: nan
+  stream    || narration_val_L4096_I1    || notalk0.6-maxlen_4k     : ego4d        AP: nan  AR: nan  Avg-F1: nan  JI: 0.103  bleu4: 0.000  num_m: nan
+  stream    || narration_val_L4096_I1    || notalk0.7-maxlen_4k     : ego4d        AP: nan  AR: nan  Avg-F1: nan  JI: 0.101  bleu4: 0.000  num_m: nan
+  stream    || narration_val_L4096_I1    || notalk0.8-maxlen_4k     : ego4d        AP: nan  AR: nan  Avg-F1: nan  JI: 0.109  bleu4: 0.000  num_m: nan
+  stream    || narration_val_L4096_I1    || notalk0.9-maxlen_4k     : ego4d        AP: nan  AR: nan  Avg-F1: nan  JI: 0.109  bleu4: 0.000  num_m: nan
+Model: 20240815-L4096-I1-ep4-NOSEP-nr0.2-s2-lora
+  stream    || dialog_val_L0_I1          || notalk0.5-maxlen_4k     : all-dialogs  AP: nan  AR: nan  Avg-F1: nan  JI: 0.309  bleu4: 0.121  num_m: nan
+Model: 20240816-L4096-I1-ep8-NOSEP-nr0.2-1s-lora-bs256
+  stream    || dialog_val_L0_I1          || notalk0.5-maxlen_4k     : all-dialogs  AP: nan  AR: nan  Avg-F1: nan  JI: 0.336  bleu4: 0.103  num_m: nan
+  stream    || narration_val_L4096_I1    || notalk0.3-maxlen_4k     : ego4d        AP: 0.279  AR: 0.226  Avg-F1: 0.250  JI: 0.400  bleu4: 0.130  num_m: nan
+  stream    || narration_val_L4096_I1    || notalk0.5-maxlen_4k     : ego4d        AP: 0.083  AR: 0.392  Avg-F1: 0.137  JI: 0.186  bleu4: 0.116  num_m: nan
+  stream    || narration_val_L4096_I1    || notalk0.7-maxlen_4k     : ego4d        AP: 0.046  AR: 0.408  Avg-F1: 0.083  JI: 0.113  bleu4: 0.113  num_m: nan
+Model: 20240816-L4096-I10-ep8-NOSEP-nr0.2-1s-lora-bs32
+Model: 20240817-L4096-I1-ep4-NOSEP-nr0.2-w2t_head-1s-lora-bs256
+  stream    || narration_val_L4096_I1    || notalk0.2-maxlen_4k     : ego4d        AP: nan  AR: nan  Avg-F1: nan  JI: 0.353  bleu4: 0.065  num_m: nan
+  stream    || narration_val_L4096_I1    || notalk0.3-maxlen_4k     : ego4d        AP: nan  AR: nan  Avg-F1: nan  JI: 0.311  bleu4: 0.027  num_m: nan
+  stream    || narration_val_L4096_I10   || notalk0.2-maxlen_4k     : ego4d        AP: nan  AR: nan  Avg-F1: nan  JI: 0.418  bleu4: 0.104  num_m: nan
+  stream    || narration_val_L4096_I10   || notalk0.3-maxlen_4k     : ego4d        AP: nan  AR: nan  Avg-F1: nan  JI: 0.389  bleu4: 0.028  num_m: nan
+  stream    || narration_val_L4096_I10   || notalk0.4-maxlen_4k     : ego4d        AP: nan  AR: nan  Avg-F1: nan  JI: 0.249  bleu4: 0.013  num_m: nan
+Model: 20240820-L4096-I1-ep4-NOSEP-nr0.2-klgmix-1s-lora-bs256
+  stream    || dialog_val_L0_I1          || notalk0.3-maxlen_4k     : all-dialogs  AP: nan  AR: nan  Avg-F1: nan  JI: 0.317  bleu4: 0.135  num_m: nan
+  stream    || dialog_val_L0_I1          || notalk0.5-maxlen_4k     : all-dialogs  AP: nan  AR: nan  Avg-F1: nan  JI: 0.347  bleu4: 0.114  num_m: nan
+  stream    || narration_val_L4096_I1    || notalk0.2-maxlen_4k     : ego4d        AP: nan  AR: nan  Avg-F1: nan  JI: 0.058  bleu4: 0.112  num_m: nan
+  stream    || narration_val_L4096_I1    || notalk0.3-maxlen_4k     : ego4d        AP: nan  AR: nan  Avg-F1: nan  JI: 0.311  bleu4: 0.139  num_m: nan
+  stream    || narration_val_L4096_I1    || notalk0.4-maxlen_4k     : ego4d        AP: nan  AR: nan  Avg-F1: nan  JI: 0.285  bleu4: 0.124  num_m: nan
+  stream    || narration_val_L4096_I1    || notalk0.5-maxlen_4k     : ego4d        AP: nan  AR: nan  Avg-F1: nan  JI: 0.192  bleu4: 0.128  num_m: nan
+Model: 20240820-L4096-I1-ep4-NOSEP-nr0.1-1s-lora-bs256
+  stream    || dialog_val_L0_I1          || notalk0.3-maxlen_4k     : all-dialogs  AP: 0.193  AR: 0.102  Avg-F1: 0.128  JI: 0.372  bleu4: 0.169  num_m: 2033.833
+  stream    || dialog_val_L0_I1          || notalk0.35-maxlen_4k    : all-dialogs  AP: 0.152  AR: 0.114  Avg-F1: 0.125  JI: 0.384  bleu4: 0.162  num_m: 2358.667
+  stream    || dialog_val_L0_I1          || notalk0.45-maxlen_4k    : all-dialogs  AP: 0.078  AR: 0.139  Avg-F1: 0.095  JI: 0.315  bleu4: 0.144  num_m: 3238.333
+  stream    || dialog_val_L0_I1          || notalk0.5-maxlen_4k     : all-dialogs  AP: 0.059  AR: 0.151  Avg-F1: 0.080  JI: 0.262  bleu4: 0.138  num_m: 3708.167
+  stream    || narration_val_L4096_I1    || notalk0.2-maxlen_4k     : ego4d        AP: 0.372  AR: 0.073  Avg-F1: 0.122  JI: 0.161  bleu4: 0.144  num_m: 1320.000
+  stream    || narration_val_L4096_I1    || notalk0.3-maxlen_4k     : ego4d        AP: 0.241  AR: 0.322  Avg-F1: 0.275  JI: 0.489  bleu4: 0.131  num_m: 5978.000
+  stream    || narration_val_L4096_I1    || notalk0.4-maxlen_4k     : ego4d        AP: 0.124  AR: 0.408  Avg-F1: 0.191  JI: 0.290  bleu4: 0.131  num_m: 7560.000
+  stream    || narration_val_L4096_I1    || notalk0.5-maxlen_4k     : ego4d        AP: 0.068  AR: 0.396  Avg-F1: 0.116  JI: 0.166  bleu4: 0.131  num_m: 7548.000
+Model: 20240820-L4096-I1-ep4-NOSEP-nr0.01-1s-lora-bs256
+  stream    || dialog_val_L0_I1          || notalk0.3-maxlen_4k     : all-dialogs  AP: 0.089  AR: 0.137  Avg-F1: 0.102  JI: 0.389  bleu4: 0.139  num_m: 3250.000
+  stream    || dialog_val_L0_I1          || notalk0.4-maxlen_4k     : all-dialogs  AP: 0.044  AR: 0.164  Avg-F1: 0.067  JI: 0.233  bleu4: 0.131  num_m: 4156.333
+  stream    || dialog_val_L0_I1          || notalk0.5-maxlen_4k     : all-dialogs  AP: 0.029  AR: 0.177  Avg-F1: 0.049  JI: 0.154  bleu4: 0.128  num_m: 4492.833
+  stream    || dialog_val_L0_I1          || notalk0.6-maxlen_4k     : all-dialogs  AP: 0.023  AR: 0.183  Avg-F1: 0.040  JI: 0.120  bleu4: 0.124  num_m: 4653.167
+  stream    || narration_val_L4096_I1    || notalk0.1-maxlen_4k     : ego4d        AP: 0.336  AR: 0.077  Avg-F1: 0.125  JI: 0.183  bleu4: 0.113  num_m: 1482.000
+  stream    || narration_val_L4096_I1    || notalk0.2-maxlen_4k     : ego4d        AP: 0.267  AR: 0.241  Avg-F1: 0.253  JI: 0.466  bleu4: 0.122  num_m: 4666.000
+  stream    || narration_val_L4096_I1    || notalk0.3-maxlen_4k     : ego4d        AP: 0.161  AR: 0.383  Avg-F1: 0.226  JI: 0.371  bleu4: 0.133  num_m: 7109.000
+  stream    || narration_val_L4096_I1    || notalk0.4-maxlen_4k     : ego4d        AP: 0.077  AR: 0.419  Avg-F1: 0.130  JI: 0.181  bleu4: 0.137  num_m: 7699.000
+  stream    || narration_val_L4096_I1    || notalk0.5-maxlen_4k     : ego4d        AP: 0.050  AR: 0.403  Avg-F1: 0.088  JI: 0.123  bleu4: 0.131  num_m: 7658.000
+Model: 20240820-L4096-I1-ep4-NOSEP-nr0.1-w2t_head_w0.2-1s-lora-bs256
+  stream    || narration_val_L4096_I1    || notalk0.2-maxlen_4k     : ego4d        AP: 0.250  AR: 0.204  Avg-F1: 0.225  JI: 0.382  bleu4: 0.141  num_m: 3814.000
+  stream    || narration_val_L4096_I1    || notalk0.3-maxlen_4k     : ego4d        AP: 0.178  AR: 0.344  Avg-F1: 0.235  JI: 0.418  bleu4: 0.137  num_m: 6505.000
+  stream    || narration_val_L4096_I1    || notalk0.4-maxlen_4k     : ego4d        AP: 0.103  AR: 0.324  Avg-F1: 0.156  JI: 0.299  bleu4: 0.120  num_m: 6573.000
+Model: 20240821-L4096-I1-ep4-NOSEP-nr0.1-klgmix-1s-lora-bs256
+  stream    || dialog_val_L0_I1          || notalk0.3-maxlen_4k     : all-dialogs  AP: 0.177  AR: 0.096  Avg-F1: 0.119  JI: 0.350  bleu4: 0.162  num_m: 2016.833
+  stream    || dialog_val_L0_I1          || notalk0.35-maxlen_4k    : all-dialogs  AP: 0.132  AR: 0.107  Avg-F1: 0.114  JI: 0.353  bleu4: 0.151  num_m: 2358.833
+  stream    || narration_val_L4096_I1    || notalk0.2-maxlen_4k     : ego4d        AP: 0.387  AR: 0.079  Avg-F1: 0.131  JI: 0.165  bleu4: 0.120  num_m: 1397.000
+  stream    || narration_val_L4096_I1    || notalk0.3-maxlen_4k     : ego4d        AP: 0.206  AR: 0.292  Avg-F1: 0.241  JI: 0.404  bleu4: 0.138  num_m: 5427.000
+  stream    || narration_val_L4096_I1    || notalk0.4-maxlen_4k     : ego4d        AP: 0.100  AR: 0.378  Avg-F1: 0.158  JI: 0.242  bleu4: 0.126  num_m: 7143.000
+Model: 20240821-L4096-I10-ep4-NOSEP-nr0.1-klgmix-1s-lora-bs512
+  stream    || narration_val_L4096_I10   || notalk0.2-maxlen_4k     : ego4d        AP: 0.423  AR: 0.156  Avg-F1: 0.228  JI: 0.324  bleu4: 0.149  num_m: 2682.000
+  stream    || narration_val_L4096_I10   || notalk0.3-maxlen_4k     : ego4d        AP: 0.328  AR: 0.322  Avg-F1: 0.325  JI: 0.571  bleu4: 0.147  num_m: 5684.000
+  stream    || narration_val_L4096_I10   || notalk0.4-maxlen_4k     : ego4d        AP: 0.239  AR: 0.403  Avg-F1: 0.300  JI: 0.509  bleu4: 0.146  num_m: 7121.000
