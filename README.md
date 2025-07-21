@@ -8,8 +8,8 @@ Corresponding author: [Yichi Zhang](https://594zyc.github.io/)
 1. Clone the repo
 
 ```bash
-git clone https://github.com/fairinternal/proactive-assist.git
-cd proactive-assist
+git clone https://github.com/pro-assist/ProAssist.git
+cd ProAssist
 ```
 
 2. (Optional) Create a virtual environment
@@ -65,13 +65,13 @@ If you want to prepare the data from scratch using the LLM-based data generation
 cd $DATA_ROOT_DIR
 mkdir -p models && cd models
 
-# download the I=1 model
+# download the I=1 model (1 token per frame)
 git clone https://huggingface.co/594zyc/ProAssist-Model-L4096-I1
 
-# download the I=5 model
+# download the I=5 model (5 tokens per frame)
 git clone https://huggingface.co/594zyc/ProAssist-Model-L4096-I5
 
-# download the I=10 model
+# download the I=10 model (10 tokens per frame)
 git clone https://huggingface.co/594zyc/ProAssist-Model-L4096-I10
 ```
 
