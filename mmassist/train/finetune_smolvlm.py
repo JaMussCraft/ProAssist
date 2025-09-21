@@ -1,7 +1,7 @@
 """
 Fine-tune SmolVLM-Instruct on ProAssist dataset for streaming video assistance.
 
-This script adapts the SmolVLM fine-tuning approach to work with ProAssist's 
+This script adapts the SmolVLM fine-tuning approach to work with ProAssist's
 multi-modal conversation format with temporal video frames.
 """
 
@@ -12,11 +12,11 @@ from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Union, Literal, Tuple
 import transformers
 from transformers import (
-    AutoProcessor, 
+    AutoProcessor,
     Idefics3ForConditionalGeneration,
     TrainingArguments,
     Trainer,
-    HfArgumentParser
+    HfArgumentParser,
 )
 from peft import LoraConfig, prepare_model_for_kbit_training, get_peft_model
 from transformers import BitsAndBytesConfig
@@ -32,19 +32,17 @@ from mmassist.train.utils import is_global_rank_zero
 class SmolVLMModelArguments:
     model_name_or_path: Optional[str] = field(
         default="HuggingFaceTB/SmolVLM-Instruct",
-        metadata={"help": "Path to pretrained SmolVLM model"}
+        metadata={"help": "Path to pretrained SmolVLM model"},
     )
     use_lora: bool = field(
-        default=True,
-        metadata={"help": "Whether to use LoRA fine-tuning"}
+        default=True, metadata={"help": "Whether to use LoRA fine-tuning"}
     )
     use_qlora: bool = field(
-        default=False,
-        metadata={"help": "Whether to use QLoRA (4-bit quantization)"}
+        default=False, metadata={"help": "Whether to use QLoRA (4-bit quantization)"}
     )
     freeze_vision: bool = field(
         default=False,
-        metadata={"help": "Whether to freeze vision encoder during training"}
+        metadata={"help": "Whether to freeze vision encoder during training"},
     )
 
 
@@ -52,31 +50,33 @@ class SmolVLMModelArguments:
 class SmolVLMDataArguments:
     train_datasets: str = field(
         default="wtag/dialog-klg-sum_train_L2048_I1",
-        metadata={"help": "Training datasets to use"}
+        metadata={"help": "Training datasets to use"},
     )
     eval_datasets: Optional[str] = field(
         default="wtag/dialog-klg-sum_val_L2048_I1",
-        metadata={"help": "Evaluation datasets to use"}
+        metadata={"help": "Evaluation datasets to use"},
     )
     data_root_dir: str = field(
         default="/projects/beto/swong2/proassist_data/processed_data",
-        metadata={"help": "Root directory for ProAssist data"}
+        metadata={"help": "Root directory for ProAssist data"},
     )
     max_seq_length: int = field(
-        default=8192,
-        metadata={"help": "Maximum sequence length for input"}
+        default=8192, metadata={"help": "Maximum sequence length for input"}
     )
     use_4_1_aspect_ratio: bool = field(
         default=True,
-        metadata={"help": "Whether to use 4:1 aspect ratio for optimal SmolVLM encoding"}
+        metadata={
+            "help": "Whether to use 4:1 aspect ratio for optimal SmolVLM encoding"
+        },
     )
     frame_sampling_ratio: float = field(
-        default=0.3,
-        metadata={"help": "Ratio of frames to sample from frame ranges"}
+        default=0.3, metadata={"help": "Ratio of frames to sample from frame ranges"}
     )
     context_size_limit: int = field(
         default=7500,
-        metadata={"help": "Context size limit in tokens before splitting samples (leave room below 8k)"}
+        metadata={
+            "help": "Context size limit in tokens before splitting samples (leave room below 8k)"
+        },
     )
 
 
@@ -104,7 +104,7 @@ class SmolVLMTrainingArguments(TrainingArguments):
 @dataclass
 class LoraArguments:
     lora_r: int = field(default=16)
-    lora_alpha: int = field(default=32) 
+    lora_alpha: int = field(default=32)
     lora_dropout: float = field(default=0.1)
     lora_target_modules: str = field(
         default="down_proj,o_proj,k_proj,q_proj,gate_proj,up_proj,v_proj"
@@ -114,10 +114,10 @@ class LoraArguments:
 
 class ProAssistSmolVLMDataset:
     """Dataset adapter for ProAssist data to SmolVLM format.
-    
-        The proassist samples are both split and converted to SmolVLM format at the same time.
+
+    The proassist samples are both split and converted to SmolVLM format at the same time.
     """
-    
+
     def __init__(
         self,
         proassist_dataset,
@@ -125,7 +125,7 @@ class ProAssistSmolVLMDataset:
         max_seq_length: int = 8192,
         use_4_1_aspect_ratio: bool = True,
         frame_sampling_ratio: float = 0.3,
-        context_size_limit: int = 7500  # Leave room for 1-2 turns below 8k
+        context_size_limit: int = 7500,  # Leave room for 1-2 turns below 8k
     ):
         self.proassist_dataset = proassist_dataset
         self.processor = processor
@@ -133,41 +133,41 @@ class ProAssistSmolVLMDataset:
         self.use_4_1_aspect_ratio = use_4_1_aspect_ratio
         self.frame_sampling_ratio = frame_sampling_ratio
         self.context_size_limit = context_size_limit
-        
+
         # Get image token ID for masking
         self.image_token_id = processor.tokenizer.additional_special_tokens_ids[
             processor.tokenizer.additional_special_tokens.index("<image>")
         ]
-        
+
         # Preprocess and split long samples
         self.split_samples = []
         self._preprocess_and_split_samples()
-    
+
     def __len__(self):
         return len(self.split_samples)
-    
+
     def __getitem__(self, idx):
-        return self.convert_proassist_to_smolvlm(self.split_samples[idx])
-    
+        return self.split_samples[idx]
+
     def _preprocess_and_split_samples(self):
         """Preprocess samples to handle task knowledge and split long samples."""
         for sample in self.proassist_dataset:
             # Step 1: Fix task knowledge in system messages
             processed_sample = self._fix_task_knowledge(sample)
-            
-            # Step 2: Split long conversations into smaller samples
-            split_samples = self._split_long_sample(processed_sample)
+
+            # Step 2: Split and convert samples into smolVLM format
+            split_samples = self._split_and_convert_proassist_to_smolvlm(processed_sample)
             self.split_samples.extend(split_samples)
-    
+
     def _fix_task_knowledge(self, sample):
         """Fix task knowledge placement in system messages."""
         conversation = sample["conversation"].copy()
         task_knowledge = f"Task knowledge: {sample['metadata']['knowledge']}"
-        
+
         # Find and process system messages
         first_system_idx = None
         second_system_idx = None
-        
+
         for i, turn in enumerate(conversation):
             if turn["role"] == "system":
                 if first_system_idx is None:
@@ -175,101 +175,122 @@ class ProAssistSmolVLMDataset:
                 else:
                     second_system_idx = i
                     break
-        
+
         # Remove second system turn if it contains "Task knowledge: "
-        if second_system_idx is not None and "Task knowledge: " in conversation[second_system_idx]["content"]:
+        if (
+            second_system_idx is not None
+            and "Task knowledge: " in conversation[second_system_idx]["content"]
+        ):
             conversation.pop(second_system_idx)
-        
+
         # Add task knowledge to first system turn if not already present
         first_system_content = conversation[first_system_idx]["content"]
         if "Task knowledge: " not in first_system_content:
-            conversation[first_system_idx]["content"] = f"{first_system_content} {task_knowledge}"
-        
+            conversation[first_system_idx][
+                "content"
+            ] = f"{first_system_content} {task_knowledge}"
+
         # Create updated sample
         updated_sample = sample.copy()
         updated_sample["conversation"] = conversation
         return updated_sample
-    
-    def _split_long_sample(self, sample):
-        """Split a long sample into multiple smaller samples."""
+
+    def _split_and_convert_proassist_to_smolvlm(self, sample):
+        """
+        Split a long proassist sample into multiple smaller samples
+        while converting to smolVLM format.
+        """
         conversation = sample["conversation"]
         images = sample.get("images", [])
-        
+
         # Extract assistant instruction from first system message
         assistant_instruction = self._extract_assistant_instruction(conversation)
-        
-        # split_samples = []
+
         current_messages = []
         last_progress_summary = ""
         current_images = []
-        
+
         i = 0
         while i < len(conversation):
             turn = conversation[i]
-            
-            # Temporarily add this turn to check token count
-            # temp_messages = current_messages.copy()
-            # temp_images = current_images.copy()
-            
+
             # Process the turn
             if turn["role"] == "system":
-                current_messages.append({
+                current_messages.append(
+                    {
                         "role": "system",
-                        "content": [{"type": "text", "text": turn["content"]}]
-                    })
+                        "content": [{"type": "text", "text": turn["content"]}],
+                    }
+                )
 
             elif turn["role"] == "assistant":
-                current_messages.append({
+                current_messages.append(
+                    {
                         "role": "assistant",
-                        "content": [{"type": "text", "text": turn["content"]}]
-                    })
+                        "content": [{"type": "text", "text": turn["content"]}],
+                    }
+                )
 
                 # Save progress summary if available
                 if "progress" in turn:
                     last_progress_summary = turn["progress"]
 
             elif turn["role"] == "user":
-                if current_messages and current_messages[-1]["role"] == "user": # latest turn is user
-                    current_messages[-1]["content"].append({"type": "text", "text": turn["content"]})
+                if (
+                    current_messages and current_messages[-1]["role"] == "user"
+                ):  # latest turn is user
+                    current_messages[-1]["content"].append(
+                        {"type": "text", "text": turn["content"]}
+                    )
 
                 else:
-                    current_messages.append({
+                    current_messages.append(
+                        {
                             "role": "user",
-                            "content": [{"type": "text", "text": turn["content"]}]
-                        })
+                            "content": [{"type": "text", "text": turn["content"]}],
+                        }
+                    )
 
             elif turn["role"] == "frames":
                 # Sample frames and add as user message
                 start = turn["start"] - sample["start_frame_idx"]
                 end = turn["end"] - sample["start_frame_idx"]
-                
+
                 num_frames = max(0, min(end, len(images)) - max(0, start))
-                
+
                 # Sample frames based on sampling ratio
-                sampled_frame_count = max(1, int(num_frames * self.frame_sampling_ratio))
-                
+                sampled_frame_count = max(
+                    1, int(num_frames * self.frame_sampling_ratio)
+                )
+
                 if sampled_frame_count > 0:
                     step = max(1, num_frames // sampled_frame_count)
-                    frame_indices = list(range(start, min(end, len(images)), step))[:sampled_frame_count]
-                    
+                    frame_indices = list(range(start, min(end, len(images)), step))[
+                        :sampled_frame_count
+                    ]
+
                     # Get actual image tensors
                     sampled_images = []
                     for k in frame_indices:
                         if k < len(images):
-                            sampled_images.append(images[k:k+1])
-                    
+                            sampled_images.append(images[k : k + 1])
+
                     print(f"Sampled {len(sampled_images)} frames from {start} to {end}")
-                          
+
                     sampled_pil_images = []
                     for pt_img in sampled_images:
                         pil_img = tensor_to_pil_images(pt_img)[0]
-                        # pil_img = self.resize_image_for_optimal_encoding(pil_img)
+                        pil_img = self.resize_image_for_optimal_encoding(pil_img)
 
-                        if current_messages and current_messages[-1]["role"] == "user": # latest turn is user
-                            current_messages[-1]["content"].append({"type": "image", "image": pil_img})
+                        if (
+                            current_messages and current_messages[-1]["role"] == "user"
+                        ):  # latest turn is user
+                            current_messages[-1]["content"].append({"type": "image"})
 
                         else:
-                            current_messages.append({"role": "user", "content": [{"type": "image", "image": pil_img}]})
+                            current_messages.append(
+                                {"role": "user", "content": [{"type": "image"}]}
+                            )
 
                         current_images.append(pil_img)
 
@@ -277,65 +298,84 @@ class ProAssistSmolVLMDataset:
             print("New turn: ", turn)
             print("New messages: ", current_messages)
             print(f"len(current_images): {len(current_images)}")
-            
+
             # Check if this would exceed our token limit using smolVLM processor
-            inputs = self.processor.apply_chat_template(
-                current_messages,
-                add_generation_prompt=False,
-                tokenize=True,
-                return_dict=False,
-                return_tensors="pt",
-                padding=False,
-                truncation=False
+            prompt = self.processor.apply_chat_template(
+                current_messages, add_generation_prompt=False
             )
-            token_count = inputs.shape[1]
+            inputs = self.processor(
+                text=prompt,
+                images=current_images if current_images else None,
+                return_tensors="pt",
+            )
+
+            # Count tokens
+            token_count = inputs["input_ids"].shape[1]
             print(f"Current messages' total token count: {token_count}")
-            num_image_tokens = (inputs == self.image_token_id).sum().item()
+            num_image_tokens = (inputs["input_ids"] == self.image_token_id).sum().item()
             print(f"Current messages' image token count: {num_image_tokens}")
-            
+
             # add split sample when context_size is reached
             if current_messages and token_count > self.context_size_limit:
                 # add a system role summary prompt followed by an assistant progress summary turn
-                current_messages.append({
+                current_messages.append(
+                    {
                         "role": "system",
-                        "content": [{"type": "text", "text": "Please summarize the progress."}]
-                    })
-                
-                current_messages.append({
+                        "content": [
+                            {"type": "text", "text": "Please summarize the progress."}
+                        ],
+                    }
+                )
+
+                current_messages.append(
+                    {
                         "role": "assistant",
-                        "content": [{"type": "text", "text": last_progress_summary}]
-                    })
-                
+                        "content": [{"type": "text", "text": last_progress_summary}],
+                    }
+                )
+
                 # Create new sample
                 split_sample = {
                     "messages": current_messages,
-                    "images": current_images
+                    "images": current_images,
+                    "sample_metadata": {
+                        "sample_idx": sample.get("sample_idx", -1),
+                        "video_uid": sample.get("video_uid", "unknown"),
+                        "num_frames": len(current_images),
+                    },
                 }
-                
+
                 self.split_samples.append(split_sample)
-                
+
                 # Reset for next sample
                 current_messages = []
                 current_images = []
-                
+
                 # Start new sample with updated system message
                 if last_progress_summary:
                     system_msg = self._create_system_message(
-                        assistant_instruction, last_progress_summary, sample["metadata"]["knowledge"]
+                        assistant_instruction,
+                        last_progress_summary,
+                        sample["metadata"]["knowledge"],
                     )
                     current_messages.append({"role": "system", "content": system_msg})
-        
+
             i += 1
-        
+
         # Add unfull/remaining messages as a final sample
         if current_messages:
-            split_sample = {
+            split_sample = split_sample = {
                 "messages": current_messages,
-                "images": current_images
+                "images": current_images,
+                "sample_metadata": {
+                    "sample_idx": sample.get("sample_idx", -1),
+                    "video_uid": sample.get("video_uid", "unknown"),
+                    "num_frames": len(current_images),
+                },
             }
-            
+
             self.split_samples.append(split_sample)
-                    
+
     def _extract_assistant_instruction(self, conversation):
         """Extract assistant instruction from first system message."""
         for turn in conversation:
@@ -351,213 +391,127 @@ class ProAssistSmolVLMDataset:
                     content = content.split("Task knowledge: ")[0].strip()
 
                 return content
-        
+
         # default
         return "You are a helpful and proactive assistant. Always be ready to assist and provide useful information ahead of time."
-    
+
     def _process_frames_turn_with_images(self, turn, sample, images):
         """Process frames turn and return both text content and actual images."""
         start = turn["start"] - sample["start_frame_idx"]
         end = turn["end"] - sample["start_frame_idx"]
-        
+
         num_frames = max(0, min(end, len(images)) - max(0, start))
         if num_frames == 0:
             return "", []
-        
+
         # Sample frames based on sampling ratio
         sampled_frame_count = max(1, int(num_frames * self.frame_sampling_ratio))
-        
+
         if sampled_frame_count > 0:
             step = max(1, num_frames // sampled_frame_count)
-            frame_indices = list(range(start, min(end, len(images)), step))[:sampled_frame_count]
-            
+            frame_indices = list(range(start, min(end, len(images)), step))[
+                :sampled_frame_count
+            ]
+
             # Get actual image tensors
             sampled_images = []
             for k in frame_indices:
                 if k < len(images):
                     sampled_images.append(images[k])
-            
-            frame_content = f"[Frames from {start} to {end}, sampled {len(sampled_images)} frames]"
+
+            frame_content = (
+                f"[Frames from {start} to {end}, sampled {len(sampled_images)} frames]"
+            )
             return frame_content, sampled_images
-        
+
         return "", []
-    
-    def _create_system_message(self, assistant_instruction, progress_summary, knowledge):
+
+    def _create_system_message(
+        self, assistant_instruction, progress_summary, knowledge
+    ):
         """Create system message with instruction, progress, and knowledge."""
         return f"{assistant_instruction}\n\n{progress_summary}\n\nTask knowledge: {knowledge}"
-    
+
     def resize_image_for_optimal_encoding(self, image):
         """Resize image to 4:1 aspect ratio for optimal SmolVLM encoding."""
         if not self.use_4_1_aspect_ratio:
             return image
-        
+
         # Calculate target dimensions maintaining 4:1 ratio
         target_width = 384
         target_height = target_width // 4  # 4:1 ratio
-        
+
         return image.resize((target_width, target_height))
-    
-    def convert_proassist_to_smolvlm(self, sample):
-        """Convert preprocessed ProAssist sample to SmolVLM chat format."""
-        conversation = sample["conversation"]
-        images = sample.get("images", [])
-        
-        # Convert to SmolVLM chat format
-        messages = []
-        current_user_content = []
-        frames_added = 0
-        selected_images = []
-        
-        for turn in conversation:
-            if turn["role"] == "system":
-                # Add system message as user content
-                if current_user_content:
-                    current_user_content.append({"type": "text", "text": turn["content"]})
-                else:
-                    current_user_content = [{"type": "text", "text": turn["content"]}]
-                    
-            elif turn["role"] == "user":
-                # Add user message to current content
-                if current_user_content:
-                    current_user_content.append({"type": "text", "text": turn["content"]})
-                else:
-                    current_user_content = [{"type": "text", "text": turn["content"]}]
-                    
-            elif turn["role"] == "frames":
-                # Process frames in this segment
-                start = turn["start"] - sample["start_frame_idx"]
-                end = turn["end"] - sample["start_frame_idx"]
-                
-                # Sample frames based on sampling ratio
-                num_frames = max(0, min(end, len(images)) - max(0, start))
-                if num_frames > 0:
-                    sampled_frames = max(1, int(num_frames * self.frame_sampling_ratio))
-                    
-                    # Get frame indices
-                    if sampled_frames > 0:
-                        step = max(1, num_frames // sampled_frames)
-                        frame_indices = list(range(start, min(end, len(images)), step))[:sampled_frames]
-                        
-                        for k in frame_indices:
-                            # Convert tensor to PIL image
-                            if k < len(images):
-                                pt_img = images[k:k+1]
-                                pil_img = tensor_to_pil_images(pt_img)[0]
-                                pil_img = self.resize_image_for_optimal_encoding(pil_img)
-                                
-                                if not current_user_content:
-                                    current_user_content = []
-                                current_user_content.append({"type": "image", "image": pil_img})
-                                selected_images.append(pil_img)
-                                frames_added += 1
-                
-            elif turn["role"] == "assistant":
-                # Add accumulated user content
-                if current_user_content:
-                    messages.append({
-                        "role": "user",
-                        "content": current_user_content
-                    })
-                    current_user_content = []
-                
-                # Add assistant response
-                messages.append({
-                    "role": "assistant", 
-                    "content": [{"type": "text", "text": turn["content"]}]
-                })
-        
-        # Add any remaining user content
-        if current_user_content:
-            messages.append({
-                "role": "user",
-                "content": current_user_content
-            })
-        
-        # Skip samples without messages or images
-        if not messages:
-            return None
-            
-        return {
-            "messages": messages,
-            "images": selected_images,
-            "sample_metadata": {
-                "sample_idx": sample.get("sample_idx", -1),
-                "video_uid": sample.get("video_uid", "unknown"),
-                "num_frames": len(selected_images)
-            }
-        }
 
 
 def collate_fn(examples, processor):
     """Collate function for SmolVLM training."""
     # Filter out None examples
     examples = [ex for ex in examples if ex is not None]
-    
+
     if not examples:
         return None
-    
+
     texts = []
     all_images = []
-    
+
     for example in examples:
         messages = example["messages"]
-        
+
         # Apply chat template
         text = processor.apply_chat_template(
-            messages, 
-            add_generation_prompt=False,
-            tokenize=False
+            messages, add_generation_prompt=False, tokenize=False
         )
         texts.append(text.strip())
-        
+
         # Collect all images from this conversation
         images = example["images"]
         all_images.append(images)
-    
+
     # Process batch
     batch = processor(
-        text=texts, 
-        images=all_images, 
-        return_tensors="pt", 
+        text=texts,
+        images=all_images,
+        return_tensors="pt",
         padding=True,
         truncation=True,
-        max_length=2048
+        max_length=2048,
     )
-    
+
     # Create labels for training
     labels = batch["input_ids"].clone()
-    
+
     # Mask padding tokens
     labels[labels == processor.tokenizer.pad_token_id] = -100
-    
+
     # Mask image tokens (model shouldn't predict image tokens)
     image_token_id = processor.tokenizer.additional_special_tokens_ids[
         processor.tokenizer.additional_special_tokens.index("<image>")
     ]
     labels[labels == image_token_id] = -100
-    
+
     batch["labels"] = labels
-    
+
     return batch
 
 
 class SmolVLMProAssistTrainer(Trainer):
     """Custom trainer for SmolVLM ProAssist fine-tuning."""
-    
+
     def __init__(self, processor, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.processor = processor
-    
+
     def get_train_dataloader(self):
         """Override to use custom collate function."""
         if self.train_dataset is None:
             raise ValueError("Trainer: training requires a train_dataset.")
-        
+
         from functools import partial
         from torch.utils.data import DataLoader
-        
+
         collate_fn_with_processor = partial(collate_fn, processor=self.processor)
-        
+
         return DataLoader(
             self.train_dataset,
             batch_size=self.args.per_device_train_batch_size,
@@ -566,20 +520,20 @@ class SmolVLMProAssistTrainer(Trainer):
             num_workers=self.args.dataloader_num_workers,
             pin_memory=self.args.dataloader_pin_memory,
         )
-    
+
     def get_eval_dataloader(self, eval_dataset=None):
         """Override to use custom collate function."""
         if eval_dataset is None:
             eval_dataset = self.eval_dataset
-            
+
         if eval_dataset is None:
             raise ValueError("Trainer: evaluation requires an eval_dataset.")
-        
+
         from functools import partial
         from torch.utils.data import DataLoader
-        
+
         collate_fn_with_processor = partial(collate_fn, processor=self.processor)
-        
+
         return DataLoader(
             eval_dataset,
             batch_size=self.args.per_device_eval_batch_size,
@@ -590,12 +544,14 @@ class SmolVLMProAssistTrainer(Trainer):
         )
 
 
-def setup_model_and_processor(model_args: SmolVLMModelArguments, lora_args: LoraArguments):
+def setup_model_and_processor(
+    model_args: SmolVLMModelArguments, lora_args: LoraArguments
+):
     """Setup SmolVLM model and processor with optional LoRA."""
-    
+
     # Load processor
     processor = AutoProcessor.from_pretrained(model_args.model_name_or_path)
-    
+
     # Setup quantization if using QLoRA
     quantization_config = None
     if model_args.use_qlora:
@@ -603,29 +559,29 @@ def setup_model_and_processor(model_args: SmolVLMModelArguments, lora_args: Lora
             load_in_4bit=True,
             bnb_4bit_use_double_quant=True,
             bnb_4bit_quant_type="nf4",
-            bnb_4bit_compute_dtype=torch.bfloat16
+            bnb_4bit_compute_dtype=torch.bfloat16,
         )
-    
+
     # Load model
     model = Idefics3ForConditionalGeneration.from_pretrained(
         model_args.model_name_or_path,
         quantization_config=quantization_config,
         torch_dtype=torch.bfloat16,
         device_map="auto",
-        trust_remote_code=True
+        trust_remote_code=True,
     )
-    
+
     # Freeze vision encoder if requested
     if model_args.freeze_vision:
         for param in model.model.vision_model.parameters():
             param.requires_grad = False
         if is_global_rank_zero():
             print("Vision encoder frozen")
-    
+
     # Setup LoRA if requested
     if model_args.use_lora or model_args.use_qlora:
         target_modules = lora_args.lora_target_modules.split(",")
-        
+
         lora_config = LoraConfig(
             r=lora_args.lora_r,
             lora_alpha=lora_args.lora_alpha,
@@ -635,41 +591,49 @@ def setup_model_and_processor(model_args: SmolVLMModelArguments, lora_args: Lora
             use_dora=lora_args.use_dora and not model_args.use_qlora,
             task_type="CAUSAL_LM",
         )
-        
+
         if model_args.use_qlora:
             model = prepare_model_for_kbit_training(model)
-        
+
         model = get_peft_model(model, lora_config)
-        
+
         if is_global_rank_zero():
-            trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+            trainable_params = sum(
+                p.numel() for p in model.parameters() if p.requires_grad
+            )
             total_params = sum(p.numel() for p in model.parameters())
-            print(f"Trainable parameters: {trainable_params:,} ({trainable_params/total_params*100:.2f}%)")
-    
+            print(
+                f"Trainable parameters: {trainable_params:,} ({trainable_params/total_params*100:.2f}%)"
+            )
+
     return model, processor
 
 
 def main():
-    parser = HfArgumentParser((
-        SmolVLMModelArguments, 
-        SmolVLMDataArguments, 
-        SmolVLMTrainingArguments,
-        LoraArguments
-    ))
-    
-    model_args, data_args, training_args, lora_args = parser.parse_args_into_dataclasses()
-    
+    parser = HfArgumentParser(
+        (
+            SmolVLMModelArguments,
+            SmolVLMDataArguments,
+            SmolVLMTrainingArguments,
+            LoraArguments,
+        )
+    )
+
+    model_args, data_args, training_args, lora_args = (
+        parser.parse_args_into_dataclasses()
+    )
+
     # Set up logging
     logging.basicConfig(
         format="%(asctime)s - %(levelname)s - %(name)s - %(message)s",
         datefmt="%m/%d/%Y %H:%M:%S",
         level=logging.INFO if training_args.local_rank in [-1, 0] else logging.WARN,
     )
-    
+
     if is_global_rank_zero():
-        print("="*50)
+        print("=" * 50)
         print("SmolVLM ProAssist Fine-tuning")
-        print("="*50)
+        print("=" * 50)
         print(f"Model: {model_args.model_name_or_path}")
         print(f"Use LoRA: {model_args.use_lora}")
         print(f"Use QLoRA: {model_args.use_qlora}")
@@ -680,10 +644,10 @@ def main():
         print(f"4:1 aspect ratio: {data_args.use_4_1_aspect_ratio}")
         print(f"Frame sampling ratio: {data_args.frame_sampling_ratio}")
         print(f"Context size limit: {data_args.context_size_limit}")
-    
+
     # Setup model and processor
     model, processor = setup_model_and_processor(model_args, lora_args)
-    
+
     # Build ProAssist datasets
     all_args_dict = {
         "data_root_dir": data_args.data_root_dir,
@@ -693,13 +657,15 @@ def main():
         "keep_images": True,  # Essential for SmolVLM training
         "remove_summarize_turns": False,
     }
-    
+
     if is_global_rank_zero():
         print("\nLoading ProAssist datasets...")
-    
+
     train_dataset = build_train_dataset(**all_args_dict)
-    eval_datasets = build_eval_datasets(**all_args_dict) if data_args.eval_datasets else {}
-    
+    eval_datasets = (
+        build_eval_datasets(**all_args_dict) if data_args.eval_datasets else {}
+    )
+
     # Convert to SmolVLM format
     smolvlm_train_dataset = ProAssistSmolVLMDataset(
         train_dataset,
@@ -707,9 +673,9 @@ def main():
         max_seq_length=data_args.max_seq_length,
         use_4_1_aspect_ratio=data_args.use_4_1_aspect_ratio,
         frame_sampling_ratio=data_args.frame_sampling_ratio,
-        context_size_limit=data_args.context_size_limit
+        context_size_limit=data_args.context_size_limit,
     )
-    
+
     smolvlm_eval_dataset = None
     if eval_datasets:
         eval_dataset = list(eval_datasets.values())[0]  # Use first eval dataset
@@ -719,9 +685,9 @@ def main():
             max_seq_length=data_args.max_seq_length,
             use_4_1_aspect_ratio=data_args.use_4_1_aspect_ratio,
             frame_sampling_ratio=data_args.frame_sampling_ratio,
-            context_size_limit=data_args.context_size_limit
+            context_size_limit=data_args.context_size_limit,
         )
-    
+
     if is_global_rank_zero():
         print(f"\nOriginal train dataset size: {len(train_dataset)}")
         print(f"Split train dataset size: {len(smolvlm_train_dataset)}")
@@ -729,7 +695,7 @@ def main():
             eval_dataset_size = len(list(eval_datasets.values())[0])
             print(f"Original eval dataset size: {eval_dataset_size}")
             print(f"Split eval dataset size: {len(smolvlm_eval_dataset)}")
-    
+
     # Initialize trainer
     trainer = SmolVLMProAssistTrainer(
         processor=processor,
@@ -738,18 +704,18 @@ def main():
         train_dataset=smolvlm_train_dataset,
         eval_dataset=smolvlm_eval_dataset,
     )
-    
+
     # Start training
     if is_global_rank_zero():
         print("\nStarting training...")
-    
+
     trainer.train()
-    
+
     # Save final model
     if training_args.local_rank == 0:
         trainer.save_model()
         processor.save_pretrained(training_args.output_dir)
-        
+
         if is_global_rank_zero():
             print(f"Model saved to {training_args.output_dir}")
 
