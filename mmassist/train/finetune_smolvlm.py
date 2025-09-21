@@ -70,10 +70,6 @@ class SmolVLMDataArguments:
         default=True,
         metadata={"help": "Whether to use 4:1 aspect ratio for optimal SmolVLM encoding"}
     )
-    frames_per_sample: int = field(
-        default=5,
-        metadata={"help": "Maximum number of frames to include per sample"}
-    )
     frame_sampling_ratio: float = field(
         default=0.3,
         metadata={"help": "Ratio of frames to sample from frame ranges"}
@@ -125,7 +121,6 @@ class ProAssistSmolVLMDataset:
         processor,
         max_seq_length: int = 2048,
         use_4_1_aspect_ratio: bool = True,
-        frames_per_sample: int = 5,
         frame_sampling_ratio: float = 0.3,
         context_size_limit: int = 6000  # Leave room for 1-2 turns below 8k
     ):
@@ -133,7 +128,6 @@ class ProAssistSmolVLMDataset:
         self.processor = processor
         self.max_seq_length = max_seq_length
         self.use_4_1_aspect_ratio = use_4_1_aspect_ratio
-        self.frames_per_sample = frames_per_sample
         self.frame_sampling_ratio = frame_sampling_ratio
         self.context_size_limit = context_size_limit
         
@@ -346,7 +340,6 @@ class ProAssistSmolVLMDataset:
         
         # Sample frames based on sampling ratio
         sampled_frame_count = max(1, int(num_frames * self.frame_sampling_ratio))
-        sampled_frame_count = min(sampled_frame_count, self.frames_per_sample)
         
         if sampled_frame_count > 0:
             step = max(1, num_frames // sampled_frame_count)
@@ -443,7 +436,6 @@ class ProAssistSmolVLMDataset:
                 num_frames = max(0, min(end, len(images)) - max(0, start))
                 if num_frames > 0:
                     sampled_frames = max(1, int(num_frames * self.frame_sampling_ratio))
-                    sampled_frames = min(sampled_frames, self.frames_per_sample - frames_added)
                     
                     # Get frame indices
                     if sampled_frames > 0:
@@ -451,9 +443,6 @@ class ProAssistSmolVLMDataset:
                         frame_indices = list(range(start, min(end, len(images)), step))[:sampled_frames]
                         
                         for k in frame_indices:
-                            if frames_added >= self.frames_per_sample:
-                                break
-                                
                             # Convert tensor to PIL image
                             if k < len(images):
                                 pt_img = images[k:k+1]
@@ -693,7 +682,6 @@ def main():
         print(f"Eval datasets: {data_args.eval_datasets}")
         print(f"Max sequence length: {data_args.max_seq_length}")
         print(f"4:1 aspect ratio: {data_args.use_4_1_aspect_ratio}")
-        print(f"Frames per sample: {data_args.frames_per_sample}")
         print(f"Frame sampling ratio: {data_args.frame_sampling_ratio}")
         print(f"Context size limit: {data_args.context_size_limit}")
     
@@ -722,7 +710,6 @@ def main():
         processor,
         max_seq_length=data_args.max_seq_length,
         use_4_1_aspect_ratio=data_args.use_4_1_aspect_ratio,
-        frames_per_sample=data_args.frames_per_sample,
         frame_sampling_ratio=data_args.frame_sampling_ratio,
         context_size_limit=data_args.context_size_limit
     )
@@ -735,7 +722,6 @@ def main():
             processor,
             max_seq_length=data_args.max_seq_length,
             use_4_1_aspect_ratio=data_args.use_4_1_aspect_ratio,
-            frames_per_sample=data_args.frames_per_sample,
             frame_sampling_ratio=data_args.frame_sampling_ratio,
             context_size_limit=data_args.context_size_limit
         )
