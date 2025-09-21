@@ -93,6 +93,7 @@ class BaseDataset(Dataset):
             "start_frame_idx": start_idx,
             "end_frame_idx": end_idx,
             "neg_frame_sampling_rate": neg_frame_sampling_rate,
+            "metadata": metadata
         }
 
         feature_file_name = sample["frames_file"].split("/")[-1]

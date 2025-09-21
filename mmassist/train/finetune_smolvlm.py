@@ -63,7 +63,7 @@ class SmolVLMDataArguments:
         metadata={"help": "Root directory for ProAssist data"}
     )
     max_seq_length: int = field(
-        default=2048,
+        default=8192,
         metadata={"help": "Maximum sequence length for input"}
     )
     use_4_1_aspect_ratio: bool = field(
@@ -75,7 +75,7 @@ class SmolVLMDataArguments:
         metadata={"help": "Ratio of frames to sample from frame ranges"}
     )
     context_size_limit: int = field(
-        default=6000,
+        default=7500,
         metadata={"help": "Context size limit in tokens before splitting samples (leave room below 8k)"}
     )
 
@@ -113,16 +113,19 @@ class LoraArguments:
 
 
 class ProAssistSmolVLMDataset:
-    """Dataset adapter for ProAssist data to SmolVLM format."""
+    """Dataset adapter for ProAssist data to SmolVLM format.
+    
+        The proassist samples are both split and converted to SmolVLM format at the same time.
+    """
     
     def __init__(
         self,
         proassist_dataset,
         processor,
-        max_seq_length: int = 2048,
+        max_seq_length: int = 8192,
         use_4_1_aspect_ratio: bool = True,
         frame_sampling_ratio: float = 0.3,
-        context_size_limit: int = 6000  # Leave room for 1-2 turns below 8k
+        context_size_limit: int = 7500  # Leave room for 1-2 turns below 8k
     ):
         self.proassist_dataset = proassist_dataset
         self.processor = processor
@@ -180,7 +183,7 @@ class ProAssistSmolVLMDataset:
         # Add task knowledge to first system turn if not already present
         first_system_content = conversation[first_system_idx]["content"]
         if "Task knowledge: " not in first_system_content:
-            conversation[first_system_idx]["content"] = f"{first_system_content}. {task_knowledge}"
+            conversation[first_system_idx]["content"] = f"{first_system_content} {task_knowledge}"
         
         # Create updated sample
         updated_sample = sample.copy()
@@ -195,7 +198,7 @@ class ProAssistSmolVLMDataset:
         # Extract assistant instruction from first system message
         assistant_instruction = self._extract_assistant_instruction(conversation)
         
-        split_samples = []
+        # split_samples = []
         current_messages = []
         last_progress_summary = ""
         current_images = []
@@ -205,129 +208,152 @@ class ProAssistSmolVLMDataset:
             turn = conversation[i]
             
             # Temporarily add this turn to check token count
-            temp_messages = current_messages.copy()
-            temp_images = current_images.copy()
+            # temp_messages = current_messages.copy()
+            # temp_images = current_images.copy()
             
-            # Process the turn and add to temp messages
+            # Process the turn
             if turn["role"] == "system":
-                temp_messages.append(turn)
+                current_messages.append({
+                        "role": "system",
+                        "content": [{"type": "text", "text": turn["content"]}]
+                    })
+
             elif turn["role"] == "assistant":
-                temp_messages.append(turn)
+                current_messages.append({
+                        "role": "assistant",
+                        "content": [{"type": "text", "text": turn["content"]}]
+                    })
+
                 # Save progress summary if available
                 if "progress" in turn:
                     last_progress_summary = turn["progress"]
+
             elif turn["role"] == "user":
-                temp_messages.append(turn)
+                if current_messages and current_messages[-1]["role"] == "user": # latest turn is user
+                    current_messages[-1]["content"].append({"type": "text", "text": turn["content"]})
+
+                else:
+                    current_messages.append({
+                            "role": "user",
+                            "content": [{"type": "text", "text": turn["content"]}]
+                        })
+
             elif turn["role"] == "frames":
                 # Sample frames and add as user message
-                frame_content, sampled_images = self._process_frames_turn_with_images(turn, sample, images)
-                if frame_content:
-                    # Append to existing user message or create new one
-                    if temp_messages and temp_messages[-1]["role"] == "user":
-                        temp_messages[-1]["content"] += f"\n{frame_content}"
-                    else:
-                        temp_messages.append({"role": "user", "content": frame_content})
-                    temp_images.extend(sampled_images)
-            
-            # Check if this would exceed our token limit
-            if temp_messages:
-                token_count = self._get_exact_token_count(temp_messages, temp_images)
+                start = turn["start"] - sample["start_frame_idx"]
+                end = turn["end"] - sample["start_frame_idx"]
                 
-                if token_count > self.context_size_limit and current_messages:
-                    # Create a sample from current messages (before adding this turn)
-                    split_sample = self._create_split_sample(
-                        sample, current_messages, last_progress_summary, assistant_instruction
-                    )
-                    if split_sample:
-                        split_sample["images"] = current_images
-                        split_samples.append(split_sample)
+                num_frames = max(0, min(end, len(images)) - max(0, start))
+                
+                # Sample frames based on sampling ratio
+                sampled_frame_count = max(1, int(num_frames * self.frame_sampling_ratio))
+                
+                if sampled_frame_count > 0:
+                    step = max(1, num_frames // sampled_frame_count)
+                    frame_indices = list(range(start, min(end, len(images)), step))[:sampled_frame_count]
                     
-                    # Reset for next sample
-                    current_messages = []
-                    current_images = []
+                    # Get actual image tensors
+                    sampled_images = []
+                    for k in frame_indices:
+                        if k < len(images):
+                            sampled_images.append(images[k:k+1])
                     
-                    # Start new sample with updated system message
-                    if last_progress_summary:
-                        system_msg = self._create_system_message(
-                            assistant_instruction, last_progress_summary, sample["metadata"]["knowledge"]
-                        )
-                        current_messages.append({"role": "system", "content": system_msg})
-                    
-                    # Don't increment i - process this turn in the new sample
-                    continue
+                    print(f"Sampled {len(sampled_images)} frames from {start} to {end}")
+                          
+                    sampled_pil_images = []
+                    for pt_img in sampled_images:
+                        pil_img = tensor_to_pil_images(pt_img)[0]
+                        # pil_img = self.resize_image_for_optimal_encoding(pil_img)
+
+                        if current_messages and current_messages[-1]["role"] == "user": # latest turn is user
+                            current_messages[-1]["content"].append({"type": "image", "image": pil_img})
+
+                        else:
+                            current_messages.append({"role": "user", "content": [{"type": "image", "image": pil_img}]})
+
+                        current_images.append(pil_img)
+
+            print("YIPPIE: ")
+            print("New turn: ", turn)
+            print("New messages: ", current_messages)
+            print(f"len(current_images): {len(current_images)}")
             
-            # Add the turn to current messages (commit the temp changes)
-            current_messages = temp_messages
-            current_images = temp_images
+            # Check if this would exceed our token limit using smolVLM processor
+            inputs = self.processor.apply_chat_template(
+                current_messages,
+                add_generation_prompt=False,
+                tokenize=True,
+                return_dict=False,
+                return_tensors="pt",
+                padding=False,
+                truncation=False
+            )
+            token_count = inputs.shape[1]
+            print(f"Current messages' total token count: {token_count}")
+            num_image_tokens = (inputs == self.image_token_id).sum().item()
+            print(f"Current messages' image token count: {num_image_tokens}")
+            
+            # add split sample when context_size is reached
+            if current_messages and token_count > self.context_size_limit:
+                # add a system role summary prompt followed by an assistant progress summary turn
+                current_messages.append({
+                        "role": "system",
+                        "content": [{"type": "text", "text": "Please summarize the progress."}]
+                    })
+                
+                current_messages.append({
+                        "role": "assistant",
+                        "content": [{"type": "text", "text": last_progress_summary}]
+                    })
+                
+                # Create new sample
+                split_sample = {
+                    "messages": current_messages,
+                    "images": current_images
+                }
+                
+                self.split_samples.append(split_sample)
+                
+                # Reset for next sample
+                current_messages = []
+                current_images = []
+                
+                # Start new sample with updated system message
+                if last_progress_summary:
+                    system_msg = self._create_system_message(
+                        assistant_instruction, last_progress_summary, sample["metadata"]["knowledge"]
+                    )
+                    current_messages.append({"role": "system", "content": system_msg})
+        
             i += 1
         
-        # Add remaining messages as a final sample
+        # Add unfull/remaining messages as a final sample
         if current_messages:
-            split_sample = self._create_split_sample(
-                sample, current_messages, last_progress_summary, assistant_instruction
-            )
-            if split_sample:
-                split_sample["images"] = current_images
-                split_samples.append(split_sample)
-        
-        return split_samples if split_samples else [sample]  # Return original if no splitting occurred
+            split_sample = {
+                "messages": current_messages,
+                "images": current_images
+            }
             
+            self.split_samples.append(split_sample)
+                    
     def _extract_assistant_instruction(self, conversation):
         """Extract assistant instruction from first system message."""
         for turn in conversation:
             if turn["role"] == "system":
                 content = turn["content"]
+
                 # Remove progress summary part
                 if "The time elapsed since" in content:
                     content = content.split("The time elapsed since")[0].strip()
+
+                # Remove task knowledge part
+                if "Task knowledge: " in content:
+                    content = content.split("Task knowledge: ")[0].strip()
+
                 return content
         
         # default
         return "You are a helpful and proactive assistant. Always be ready to assist and provide useful information ahead of time."
-    
-    def _get_exact_token_count(self, messages, images=None):
-        """Get exact token count using SmolVLM processor."""
-        try:
-            # Convert messages to the format expected by apply_chat_template
-            formatted_messages = []
-            for msg in messages:
-                if msg["role"] in ["system", "user", "assistant"]:
-                    formatted_messages.append({
-                        "role": msg["role"],
-                        "content": [{"type": "text", "text": msg["content"]}]
-                    })
-            
-            if not formatted_messages:
-                return 0
-            
-            # Apply chat template and tokenize
-            text = self.processor.apply_chat_template(
-                formatted_messages,
-                add_generation_prompt=False,
-                tokenize=False
-            )
-            
-            # Tokenize to get exact count
-            inputs = self.processor.tokenizer(
-                text,
-                return_tensors="pt",
-                padding=False,
-                truncation=False
-            )
-            
-            num_tokens = inputs['input_ids'].shape[1]
-            
-            # Add estimated tokens for images
-            if images:
-                # SmolVLM typically uses around 64 tokens per image
-                num_tokens += len(images) * 64
-            
-            return num_tokens
-            
-        except Exception as e:
-            # Fallback to character-based estimation if processor fails
-            total_chars = sum(len(msg["content"]) for msg in messages if "content" in msg)
-            return total_chars // 4  # Rough token estimation
     
     def _process_frames_turn_with_images(self, turn, sample, images):
         """Process frames turn and return both text content and actual images."""
@@ -356,39 +382,9 @@ class ProAssistSmolVLMDataset:
         
         return "", []
     
-    def _process_frames_turn(self, turn, sample, images):
-        """Process frames turn and return text description."""
-        frame_content, _ = self._process_frames_turn_with_images(turn, sample, images)
-        return frame_content
-    
     def _create_system_message(self, assistant_instruction, progress_summary, knowledge):
         """Create system message with instruction, progress, and knowledge."""
         return f"{assistant_instruction}\n\n{progress_summary}\n\nTask knowledge: {knowledge}"
-    
-    def _create_split_sample(self, original_sample, messages, progress_summary, assistant_instruction):
-        """Create a split sample from messages."""
-        if not messages:
-            return None
-        
-        # Remove latest turns that are not assistant turns
-        while messages and messages[-1]["role"] != "assistant":
-            messages.pop()
-        
-        if not messages:
-            return None
-        
-        # Add summary prompt before the last assistant turn if we have progress
-        if len(messages) > 1 and progress_summary and messages[-1]["role"] == "assistant":
-            summary_prompt = {"role": "system", "content": "Please summarize the progress."}
-            messages.insert(-1, summary_prompt)
-            
-            # Set assistant content to progress summary
-            messages[-1]["content"] = progress_summary
-        
-        # Create new sample
-        split_sample = original_sample.copy()
-        split_sample["conversation"] = messages
-        return split_sample
     
     def resize_image_for_optimal_encoding(self, image):
         """Resize image to 4:1 aspect ratio for optimal SmolVLM encoding."""
