@@ -22,6 +22,9 @@ python mmassist/datasets/preprocess/extract_frames.py --dataset wtag --video_dir
 # Assembly101
 python mmassist/datasets/preprocess/extract_frames.py --dataset assembly101 --video_dir $RAW_DATA_DIR/assembly101/videos --output_dir $PROCESSED_DATA_DIR/assembly101/frames
 
+# EPFL
+python mmassist/datasets/preprocess/extract_frames.py --dataset epfl --video_dir $RAW_DATA_DIR/epfl/videos --output_dir $PROCESSED_DATA_DIR/epfl/frames
+
 # LLaVA Image Captioning
 python mmassist/datasets/preprocess/preprocess_llava_images.py --ann_file $RAW_DATA_DIR/LLaVA-Pretrain/blip_laion_cc_sbu_558k.json --image_root $RAW_DATA_DIR/LLaVA-Pretrain/images --output_dir $PROCESSED_DATA_DIR/llava
 

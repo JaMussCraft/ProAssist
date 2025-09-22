@@ -124,12 +124,21 @@ def resize_and_pad(
     return new_img
 
 
+def resize_width_keep_aspect_ratio(img: Image.Image, target_width: int) -> Image.Image:
+    """Resize image to target width while keeping aspect ratio"""
+    original_width, original_height = img.size
+    ratio = target_width / original_width
+    new_height = int(original_height * ratio)
+    return img.resize((target_width, new_height))
+
+
 def extract_frames_to_arrow(
     video_files: list[str],
     output_file: str,
     target_fps: int,
     resize_to_and_crop: int = -1,
     rotate: int = -1,
+    resize_mode: str = "crop",  # "crop" or "width"
 ) -> None:
 
     # sanity check
@@ -159,7 +168,10 @@ def extract_frames_to_arrow(
             if ori_idx % step_size == 0:
                 img = frame.to_image()
                 if resize_to_and_crop > 0:
-                    img = resize_and_crop(img, resize_to_and_crop)
+                    if resize_mode == "width":
+                        img = resize_width_keep_aspect_ratio(img, resize_to_and_crop)
+                    else:  # default "crop" mode
+                        img = resize_and_crop(img, resize_to_and_crop)
                 if rotate > 0:
                     img = img.rotate(rotate)
                 writer.write({"frame": img2str(img)})
