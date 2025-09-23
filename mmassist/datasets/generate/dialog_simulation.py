@@ -1,9 +1,9 @@
 from dataclasses import dataclass, asdict
 from collections import Counter
-from llm_utils import LLMGenerator
-from parse import conversation_dict_to_text, parse_text_to_conversation_dict
-from egoexolearn_tasks import EGOEXOLEARN_TASKS, get_task_descriptions
-from wtag_recipes import get_task_and_recipe
+from mmassist.datasets.generate.llm_utils import LLMGenerator
+from mmassist.datasets.generate.parse import conversation_dict_to_text, parse_text_to_conversation_dict
+from mmassist.datasets.generate.egoexolearn_tasks import EGOEXOLEARN_TASKS, get_task_descriptions
+from mmassist.datasets.generate.wtag_recipes import get_task_and_recipe
 
 # fmt: off
 DEFAULT_SYS_PROMPT = "You are a helpful assistant that follows the user's request."
@@ -468,7 +468,7 @@ def add_progress_summary(conversation: list[dict], llm: LLMGenerator) -> dict:
 class ParsedVideoAnns:
     dataset: str
     domain: str  # "cooking", "object manipulation", "lab"
-    knowedge_type: str  # "cooking recipe", ...
+    knowledge_type: str  # "cooking recipe", ...
     video_uid: str
     goal_description: str
     all_step_descriptions: str
@@ -514,7 +514,7 @@ def generate_from_annotation(
     print(f"Processing video {video_uid}")
 
     dataset = annotation.dataset
-    knowledge_type = annotation.knowedge_type
+    knowledge_type = annotation.knowledge_type
     goal_description = annotation.goal_description
     step_descriptions = annotation.all_step_descriptions
     ann_ratio = annotation.ann_ratio
@@ -536,7 +536,7 @@ def generate_from_annotation(
     inferred_goal, inferred_knowledge = infer_goal_and_knowledge(
         dataset, goal_description, step_descriptions, knowledge_type, llm, num_repeats
     )
-    print(f"inferred_goal: {inferred_goal}")
+    print(f"inferred_goal: {inferred_goal} | inferred_knowledge: {inferred_knowledge}")
     # print(f"inferred_knowledge: {inferred_knowledge}")
 
     if use_inferred_goal:

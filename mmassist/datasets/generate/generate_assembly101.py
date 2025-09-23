@@ -72,11 +72,11 @@ def parse_assembly101_ann(ann: dict, max_num_lines_per_gen: int = 6) -> ParsedVi
             num_lines_in_clip = 0
 
     task_type = "assembly" if ann["task"].startswith("asse") else "disassembly"
-    knowedge_type = f"{task_type} steps"
+    knowledge_type = f"{task_type} steps"
     parsed_ann = ParsedVideoAnns(
         dataset="assembly101",
         domain="assembly/disassembly",
-        knowedge_type=knowedge_type,
+        knowledge_type=knowledge_type,
         video_uid=ann["video_uid"],
         goal_description=ann["task"],
         all_step_descriptions=all_step_descriptions,

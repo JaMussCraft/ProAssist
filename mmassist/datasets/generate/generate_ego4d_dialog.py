@@ -121,7 +121,7 @@ def parse_ego4d_goalstep_ann(
     parsed_ann = ParsedVideoAnns(
         dataset="ego4d",
         domain="cooking",
-        knowedge_type="cooking recipe",
+        knowledge_type="cooking recipe",
         video_uid=ann["video_uid"],
         goal_description=ann["goal_description"],
         all_step_descriptions=all_step_descriptions,

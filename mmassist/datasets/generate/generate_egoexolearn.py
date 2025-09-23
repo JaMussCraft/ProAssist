@@ -64,7 +64,7 @@ def parse_egoexolearn_ann(
     parsed_ann = ParsedVideoAnns(
         dataset="egoexolearn",
         domain=domain,
-        knowedge_type=ktype,
+        knowledge_type=ktype,
         video_uid=video_uid,
         goal_description="",
         all_step_descriptions=all_step_descriptions,

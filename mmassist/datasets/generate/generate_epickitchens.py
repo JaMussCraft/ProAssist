@@ -69,7 +69,7 @@ def parse_epickitchens_ann(
     parsed_ann = ParsedVideoAnns(
         dataset="epickitchens",
         domain="cooking",
-        knowedge_type="cooking recipe",
+        knowledge_type="cooking recipe",
         video_uid=video_uid,
         goal_description="",
         all_step_descriptions=all_step_descriptions,
