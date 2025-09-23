@@ -1,5 +1,6 @@
 from dataclasses import dataclass, asdict
 from collections import Counter
+from typing import Optional, Union, List, Dict, Tuple
 from mmassist.datasets.generate.llm_utils import LLMGenerator
 from mmassist.datasets.generate.parse import conversation_dict_to_text, parse_text_to_conversation_dict
 from mmassist.datasets.generate.egoexolearn_tasks import EGOEXOLEARN_TASKS, get_task_descriptions
@@ -116,6 +117,7 @@ ADDITIONAL_REQUIREMENTS = {
     # "holoassist": "Note that the video description contains both the user's actions and the user-assistant dialog. Anchor the dialog to the **key steps** of the task, not every single action of the user. Errors made by the user and the timing of original dialog can be a strong hint for when to simulate the dialog. You may rephrase the dialog to make it more coherent and human-like.", 
     "holoassist": "Note that the video description contains both the user's actions and the user-assistant dialog. Anchor the simulated dialog to the existing dialog, and try to rephrase the utterances to make them more coherent and human-like. You may add a few more turns around the **essential steps** of the task, which are the underlying intentions of the action instead of the actions themselves. Add a few turns to make the dialog more fluent and helpful, but avoid being overwhelming.",
     "egoexolearn": "The simulated dialog should be centered around the **key steps** of the task, not every single action of the user. Try to make the dialog more coherent and helpful as what a human assistant will say.",
+    "epfl": "The simulated dialog should be centered around the **key steps** of the task, not every single action of the user. Try to make the dialog more coherent and helpful as what a human assistant will say.",
     "epickitchens": "The simulated dialog should be centered around the **key steps** of the task, not every single action of the user. Note that the user may make mistake or perform suboptimal actions, the assistant should not give instructions on those actions, but smartly select right time to give guidance. Try to make the dialog more coherent and helpful as what a human assistant will say.",
     "wtag": "Note that the video description contains both the step description and the user-assistant dialog. Anchor the simulated dialog to the existing dialog, and try to rephrase the utterances to make them more coherent and human-like. Add more details such as assistant feedback or user question during long steps if necessary. Remember to generate the response to user's question even if there isn't one in the original dialog from the video description.", 
     "assembly101": "\n\nThe mistakes made by the user are marked by (mistake: <mistake type>). If a mistake happens, we want to simulate the dialog in the way that the assistant helps the user correct the mistake. To be more specific, the assistant SHOULD NOT give instructions if an action is 'wrong order', 'previous one is mistake' or 'shouldn't have happened'. Instead, the assistant should give instruction of the CORRECT next step (i.e. scan the future actions and select the nearest correct action). Afterwards, at the start of actions marked as 'correction', the assistant should mention the previous mistake and give insruction on how to correct it based on the corrective action. For 'wrong position' mistakes, the assistant can give the instruction of that action, but need to point out the mistake at the start time of corrective action for that mistake.",
@@ -201,25 +203,33 @@ def infer_goal_and_knowledge(
     num_repeats: int = 10,
 ) -> tuple[str, str]:
 
+    print(f"         🧠 Knowledge inference strategy for '{dataset_name}'...")
+    
     # generate {num_repeats} pieces of knowledge based on the video descriptions
     if dataset_name == "egoexolearn":
         # use LLM to select from GT tasks & recipes for egoexolearn
+        print(f"         Using task matching from predefined EgoExoLearn tasks")
         tasks, task_descs = EGOEXOLEARN_TASKS, get_task_descriptions()
         return match_task(step_descriptions, llm, tasks, task_descs, num_repeats)
     elif dataset_name == "wtag":
         # can simply get the GT recipe by key word matching for WTaG
+        print(f"         Using keyword matching for WTaG recipes")
         return get_task_and_recipe(step_descriptions)
     elif dataset_name == "ego4d":
+        print(f"         Using Ego4D recipe generation template")
         gen_prompt = EGO4D_RECIPE_GEN_PROMPT_TEMPLATE.format(
             goal_description=goal_description, step_descriptions=step_descriptions
         )
     else:
+        print(f"         Using general knowledge generation for {dataset_name}")
         goal = "a task" if not goal_description else f"the task - {goal_description}"
         gen_prompt = KNOWLEDGE_GEN_PROMPT_TEMPLATE.format(
             goal_description=goal,
             step_descriptions=step_descriptions,
             knowledge_type=knowledge_type,
         )
+    
+    print(f"         Generating {num_repeats} knowledge candidates with LLM...")
     inputs = [("system", DEFAULT_SYS_PROMPT), ("user", gen_prompt)]
     outputs = llm.generate(inputs, n=num_repeats)
 
@@ -228,6 +238,7 @@ def infer_goal_and_knowledge(
         knowledges += f"{knowledge_type.capitalize()} {i+1}:\n {t}\n\n"
 
     # refine the knowledges into a single correct and complete manual
+    print(f"         Refining {num_repeats} candidates into final knowledge...")
     refine_prompt = KNOWLEDGE_REFINE_PROMPT_TEMPLATE.format(
         num_repeats=num_repeats,
         goal_description=goal_description,
@@ -239,6 +250,7 @@ def infer_goal_and_knowledge(
 
     # parse the inferred goal
     inferred_goal = refined_knowledge.split("\n")[0].replace("*", "").strip()
+    print(f"         Knowledge inference completed: '{inferred_goal}'")
     return inferred_goal, refined_knowledge
 
 
@@ -359,8 +371,10 @@ def generate_conversation(
     user_reqs = [DIALOG_GEN_USER_REQUIREMENTS[p] for p in user_types]
 
     batch_conv = [[] for _ in range(len(user_reqs))]
-    for st, et, desc in clips:
-        print(f"Generating dialog for {st:.1f}s-{et:.1f}s")
+    for clip_idx, (st, et, desc) in enumerate(clips):
+        print(f"      📹 Clip {clip_idx+1}/{len(clips)}: {st:.1f}s-{et:.1f}s ({et-st:.1f}s duration)")
+        print(f"         Description preview: {desc[:150]}...")
+        
         batch_inputs = []
         for i, user_req in enumerate(user_reqs):
             dialog_history = conversation_dict_to_text(
@@ -368,6 +382,10 @@ def generate_conversation(
             )
             if dialog_history:
                 dialog_history = f"You have already generated the following dialog:\n{dialog_history}"
+                print(f"         Using conversation history for user type {user_types[i]} ({len(batch_conv[i])} previous turns)")
+            else:
+                print(f"         Starting fresh conversation for user type {user_types[i]}")
+                
             prompt = DIALOG_GEN_PROMPT_TEMPLATE.format(
                 goal_description=goal_description,
                 step_descriptions=desc,
@@ -377,10 +395,10 @@ def generate_conversation(
                 end_time=et,
                 additional_requirement=additional_requirement,
             )
-            # print("dialog generation", prompt)
             batch_inputs.append([("system", DIALOG_GEN_SYS_PROMPT), ("user", prompt)])
 
         # parallel generate for all user profiles
+        print(f"         🤖 Generating dialogs for {len(user_types)} user types...")
         outputs = llm.batch_generate(batch_inputs)
 
         # add the generated dialog to the conversation history
@@ -389,13 +407,17 @@ def generate_conversation(
             conv_dict = parse_text_to_conversation_dict(output[0])
             conv_dict = [c for c in conv_dict if c["time"] <= et]
             clip_convs.append(conv_dict)
-            # print(inputs[1][1])
-            # print(f"Conversation {idx}, before refinement")
-            # print(conversation_dict_to_text(conv_dict, add_labels=True))
 
+        print(f"         🔧 Refining and labeling generated dialogs...")
         clip_convs_refined = refine_and_label_dialog(clip_convs, llm)
+        
         for idx, conv in enumerate(clip_convs_refined):
             batch_conv[idx].extend(conv)
+            print(f"         Added {len(conv)} turns to conversation {idx+1} ({user_types[idx]})")
+
+    print(f"   📊 Final conversation statistics:")
+    for i, conv in enumerate(batch_conv):
+        print(f"      Conversation {i+1} ({user_types[i]}): {len(conv)} total turns")
 
     # refine the dialogs and add assistant intention labels
     # batch_conv = refine_and_label_dialog(batch_conv, llm)
@@ -478,9 +500,9 @@ class ParsedVideoAnns:
     num_steps: int
     video_start_time: float = 0.0
     has_mistake: bool = False
-    num_substeps: int | None = None
-    fps: float | None = None
-    original_ann: dict | None = None
+    num_substeps: Optional[int] = None
+    fps: Optional[float] = None
+    original_ann: Optional[dict] = None
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -492,8 +514,8 @@ class GeneratedOutputs:
     inferred_goal: str
     inferred_knowledge: str
     video_labels: Counter
-    conversations: list[dict[str, str | list[dict]]]
-    parsed_video_anns: dict | None = None
+    conversations: List[Dict[str, Union[str, List[dict]]]]
+    parsed_video_anns: Optional[dict] = None
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -508,42 +530,67 @@ def generate_from_annotation(
     keep_original_anns: bool = True,
     min_ann_ratio: float = 0.5,
     filter_by_llm: bool = False,
-) -> GeneratedOutputs | str:
+) -> Union[GeneratedOutputs, str]:
 
     video_uid = annotation.video_uid
-    print(f"Processing video {video_uid}")
+    print(f"\n{'='*80}")
+    print(f"🎬 PROCESSING VIDEO: {video_uid}")
+    print(f"{'='*80}")
 
     dataset = annotation.dataset
     knowledge_type = annotation.knowledge_type
     goal_description = annotation.goal_description
     step_descriptions = annotation.all_step_descriptions
     ann_ratio = annotation.ann_ratio
+    
+    # Step 0: Input validation
+    print(f"📋 STEP 0: Input Validation")
+    print(f"   Dataset: {dataset}")
+    print(f"   Knowledge type: {knowledge_type}")
+    print(f"   Annotation ratio: {ann_ratio:.2f} (min required: {min_ann_ratio})")
+    
     if ann_ratio < min_ann_ratio:
-        skip_msg = f"Skip video {video_uid} with low annotation ratio: {ann_ratio}"
+        skip_msg = f"❌ Skip video {video_uid} with low annotation ratio: {ann_ratio}"
         print(skip_msg)
         return skip_msg
 
+    print(f"✅ Video passed validation")
     print(
         (
-            f"Goal: {goal_description}| Duration: {annotation.duration:.1f}s| "
-            f"Num steps: {annotation.num_steps}| Num substeps: {annotation.num_substeps}| "
-            f"Num clips: {len(annotation.clips)} | Ann ratio: {annotation.ann_ratio:.2f}"
+            f"   Goal: {goal_description}\n"
+            f"   Duration: {annotation.duration:.1f}s | "
+            f"   Num steps: {annotation.num_steps} | "
+            f"   Num substeps: {annotation.num_substeps} | "
+            f"   Num clips: {len(annotation.clips)} | "
+            f"   Ann ratio: {annotation.ann_ratio:.2f}"
         )
     )
 
     # 1. infer goal and recipe
-    print("Infer goal and knowledge")
+    print(f"\n📚 STEP 1: Goal & Knowledge Inference")
+    print(f"   Strategy: {dataset}-specific inference")
+    print(f"   Original goal: '{goal_description}'")
+    print(f"   Generating {num_repeats} knowledge candidates...")
+    
     inferred_goal, inferred_knowledge = infer_goal_and_knowledge(
         dataset, goal_description, step_descriptions, knowledge_type, llm, num_repeats
     )
-    print(f"inferred_goal: {inferred_goal} | inferred_knowledge: {inferred_knowledge}")
-    # print(f"inferred_knowledge: {inferred_knowledge}")
-
+    
+    print(f"✅ Knowledge inference completed")
+    print(f"   Inferred goal: '{inferred_goal}'")
+    print(f"   Inferred knowledge preview: {inferred_knowledge[:200]}...")
+    
     if use_inferred_goal:
+        print(f"   🔄 Using inferred goal instead of original")
         goal_description = inferred_goal
+    else:
+        print(f"   📌 Keeping original goal description")
 
     # 2. label video and filter out inappropriate videos
+    print(f"\n🏷️  STEP 2: Video Labeling & Filtering")
+    
     if filter_by_llm:
+        print(f"   Enabled: Running LLM-based video filtering with {num_repeats} evaluations")
         video_labels = label_video(
             goal_description,
             step_descriptions,
@@ -553,35 +600,70 @@ def generate_from_annotation(
             llm=llm,
             num_repeats=num_repeats,
         )
-        print("Label video", video_labels)
+        print(f"   Label distribution: {dict(video_labels)}")
         label, cnt = video_labels.most_common(1)[0]
+        print(f"   Most common label: {label} (count: {cnt}/{num_repeats})")
+        
         if label != 1 or cnt < num_repeats // 2:
-            skip_msg = f"Skip video {video_uid} with label: {video_labels}"
+            skip_msg = f"❌ Skip video {video_uid} - failed LLM filtering: {video_labels}"
             print(skip_msg)
             return skip_msg
+        print(f"✅ Video passed LLM filtering")
         video_labels = dict(video_labels)
     else:
+        print(f"   Disabled: Skipping LLM-based filtering")
         video_labels = {}
 
     # 3. generate the user-assistant conversations
-    print("Generate conversations")
+    print(f"\n💬 STEP 3: Conversation Generation")
+    print(f"   User types: {user_types}")
+    print(f"   Number of clips to process: {len(annotation.clips)}")
+    
     clips = annotation.clips
     add_reqs = ADDITIONAL_REQUIREMENTS.get(annotation.dataset, "")
     if dataset == "assembly101" and not annotation.has_mistake:
         add_reqs = ""
+    
+    if add_reqs:
+        print(f"   Dataset-specific requirements: {add_reqs[:100]}...")
+    else:
+        print(f"   No additional dataset-specific requirements")
+        
+    print(f"   🔄 Starting clip-by-clip dialog generation...")
     conversations = generate_conversation(
         goal_description, clips, llm, user_types, add_reqs
     )
+    print(f"✅ Generated {len(conversations)} conversations")
+    
     # adjust time
-    for conv in conversations:
+    print(f"   🕐 Adjusting conversation timing...")
+    for i, conv in enumerate(conversations):
+        original_turns = len(conv["conversation"])
         conv["conversation"] = adjust_time(conv["conversation"])
+        print(f"      Conversation {i+1}: {original_turns} turns, timing adjusted")
 
     # 4. add progress summary
-    print("Add progress summary")
-    for conv in conversations:
+    print(f"\n📝 STEP 4: Progress Summary Generation")
+    print(f"   Adding progress summaries to assistant turns...")
+    
+    for i, conv in enumerate(conversations):
+        assistant_turns_before = sum(1 for turn in conv["conversation"] if turn["role"] == "assistant")
         conv["conversation"] = add_progress_summary(conv["conversation"], llm)
+        assistant_turns_after = sum(1 for turn in conv["conversation"] if turn["role"] == "assistant" and "progress" in turn)
+        print(f"      Conversation {i+1}: Added summaries to {assistant_turns_after}/{assistant_turns_before} assistant turns")
+
+    print(f"✅ Progress summaries completed")
 
     # return the generated outputs
+    print(f"\n🎯 STEP 5: Output Preparation")
+    print(f"   Packaging results for video {video_uid}")
+    print(f"   Generated conversations: {len(conversations)}")
+    for i, conv in enumerate(conversations):
+        turns = len(conv["conversation"])
+        user_turns = sum(1 for turn in conv["conversation"] if turn["role"] == "user")
+        assistant_turns = sum(1 for turn in conv["conversation"] if turn["role"] == "assistant")
+        print(f"      Conversation {i+1} ({conv['user_type']}): {turns} total turns ({user_turns} user, {assistant_turns} assistant)")
+    
     outputs = GeneratedOutputs(
         video_uid=video_uid,
         inferred_goal=inferred_goal,
@@ -590,4 +672,7 @@ def generate_from_annotation(
         conversations=conversations,
         parsed_video_anns=annotation.to_dict() if keep_original_anns else None,
     )
+    
+    print(f"✅ Successfully generated dialog for video {video_uid}")
+    print(f"{'='*80}\n")
     return outputs

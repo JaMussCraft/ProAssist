@@ -1,13 +1,16 @@
 import os
 import json
 import pandas as pd
+import time
 from dataclasses import dataclass
 from typing import Dict, List, Tuple, Optional
 from transformers import HfArgumentParser
+from tqdm import tqdm
 
-from mmassist.datasets.generate.dialog_simulation import ParsedVideoAnns
-# from mmassist.datasets.generate.run_utils import run_jobs, get_slurm_executor, save_results, SlurmArguments
+from mmassist.datasets.generate.dialog_simulation import ParsedVideoAnns, generate_from_annotation
+from mmassist.datasets.generate.auto_eval import auto_eval_generated_conversations
 from mmassist.configs.arguments import DATA_ROOT_DIR
+from mmassist.datasets.generate.openrouter_utils import LLMGenerator
 
 
 @dataclass
@@ -16,7 +19,7 @@ class EpflPreprocessArgs:
     frames_dir: str = f"{DATA_ROOT_DIR}/processed_data/epfl/frames"
     splits: str = "train,test"
     output_dir: str = f"{DATA_ROOT_DIR}/processed_data/epfl/generated_dialogs"
-    llm: str = "anthropic/claude-3.5-sonnet"
+    llm: str = "google/gemini-2.5-flash"
     user_types: str = "no_talk@2,talk_some@4,talk_more@4"
     num_repeats: int = 10
     force_rerun: bool = False
@@ -295,14 +298,14 @@ def load_epfl_dataset(args: EpflPreprocessArgs) -> Dict[str, List[ParsedVideoAnn
                     continue
                 
                 # Check if frames exist
-                frames_path = os.path.join(args.frames_dir, participant, session)
+                frames_path = f"/projects/beto/proassist_data/processed_data/epfl/frames/{split}_{participant}_{session}_hololens_compressed.arrow"
                 if not os.path.exists(frames_path):
                     print(f"Frames not found for {participant}/{session}, skipping")
                     continue
                 
                 # Parse annotations
                 parsed_ann = parse_epfl_annotations(
-                    participant, session, annotation_dir, frames_path, 
+                    split, participant, session, annotation_dir, 
                     args.max_num_lines_per_gen
                 )
                 
@@ -315,32 +318,195 @@ def load_epfl_dataset(args: EpflPreprocessArgs) -> Dict[str, List[ParsedVideoAnn
     return anns_per_split
 
 
+def run_local_jobs(
+    args: EpflPreprocessArgs,
+    anns_per_split: Dict[str, List[dict]],
+    ann_parse_func: callable,
+):
+    """
+    Local version of the run_jobs function that processes annotations sequentially
+    without SLURM parallelization.
+    """
+    print("Starting local job execution...")
+    
+    splits = args.splits.split(",")
+    
+    # get the samples to run/load for each split
+    anns_to_run_per_split = {}
+    anns_to_load_per_split = {}
+    
+    for split in splits:
+        # get the anns in the split
+        all_anns_in_split = anns_per_split[split]
+        
+        # filter out the anns that already been processed
+        all_anns_to_run, all_anns_to_load = [], []
+        for ann in all_anns_in_split:
+            vid = ann.get("video_uid") or f"{split}_{ann['participant']}_{ann['session']}"
+            output_file = os.path.join(args.output_dir, split, f"{vid}.json")
+            if args.force_rerun:
+                all_anns_to_run.append(ann)
+            else:
+                try:
+                    with open(output_file, "r") as f:
+                        json.load(f)  # Check if file exists and is valid JSON
+                    all_anns_to_load.append(ann)
+                except (FileNotFoundError, json.JSONDecodeError):
+                    all_anns_to_run.append(ann)
+        
+        anns_to_run_per_split[split] = all_anns_to_run
+        anns_to_load_per_split[split] = all_anns_to_load
+        
+        print(f"{split}: {len(all_anns_to_run)} files to process, {len(all_anns_to_load)} already processed")
+        for ann in all_anns_to_run:
+            vid = ann.get("video_uid") or f"{split}_{ann['participant']}_{ann['session']}"
+            print(f"  {vid}")
+    
+    # parse user types
+    user_types = []
+    for user_type_with_rep in args.user_types.split(","):
+        user_type, num_repeats = user_type_with_rep.split("@")
+        user_types.extend([user_type] * int(num_repeats))
+    
+    llm, gen_args = None, None
+    split_outputs = {}
+    
+    for split in splits:
+        if split not in split_outputs:
+            split_outputs[split] = []
+        
+        # process the samples
+        if anns_to_run_per_split[split]:
+            print(f"\nProcessing {len(anns_to_run_per_split[split])} annotations for split '{split}'...")
+            
+            for ann in tqdm(anns_to_run_per_split[split], desc=f"Processing {split}"):
+                if llm is None:
+                    # build llm
+                    print(f"Initializing LLM: {args.llm}")
+                    llm = LLMGenerator.build(model_id=args.llm)
+                    gen_args = {
+                        "llm": args.llm,
+                        "user_types": args.user_types,
+                        "num_repeats": args.num_repeats,
+                        "sampling_params": llm.default_sampling_args,
+                    }
+                
+                # parse the annotation
+                parsed_ann: ParsedVideoAnns | None = ann_parse_func(ann, args.max_num_lines_per_gen)
+                if parsed_ann is None:
+                    continue
+                
+                # generate the outputs
+                outputs = generate_from_annotation(
+                    parsed_ann,
+                    llm,
+                    user_types=user_types,
+                    num_repeats=args.num_repeats,
+                    min_ann_ratio=args.min_ann_ratio,
+                    filter_by_llm=args.filter_by_llm,
+                )
+                
+                # save the output
+                output_dir = os.path.join(args.output_dir, split)
+                os.makedirs(output_dir, exist_ok=True)
+                output_file = os.path.join(output_dir, f"{parsed_ann.video_uid}.json")
+                
+                if isinstance(outputs, str):
+                    with open(output_file, "w") as f:
+                        json.dump({"reason_to_exclude": outputs}, f, indent=2)
+                else:
+                    outputs_dict = outputs.to_dict()
+                    outputs_dict["gen_args"] = gen_args
+                    with open(output_file, "w") as f:
+                        json.dump(outputs_dict, f, indent=2)
+                    
+                    if "reason_to_exclude" not in outputs_dict:
+                        split_outputs[split].append(outputs_dict)
+
+                break # for now
+        
+        # also load the samples that have been processed before
+        for ann in anns_to_load_per_split[split]:
+            # load the outputs
+            vid = ann.get("video_uid") or f"{split}_{ann['participant']}_{ann['session']}"
+            output_file = os.path.join(args.output_dir, split, f"{vid}.json")
+            try:
+                with open(output_file, "r") as f:
+                    outputs = json.load(f)
+                if "reason_to_exclude" not in outputs:
+                    split_outputs[split].append(outputs)
+            except (FileNotFoundError, json.JSONDecodeError):
+                print(f"Warning: Could not load {output_file}")
+    
+    return split_outputs
+
+
+def save_local_results(split_outputs: Dict[str, List[dict]], splits: str, output_dir: str):
+    """Save results from local execution and apply auto-evaluation"""
+    for split in splits.split(","):
+        split_data = split_outputs.get(split, [])
+        
+        # auto-evaluate all the generated dialogs
+        print(f"Auto-evaluating {len(split_data)} dialogs for split '{split}'...")
+        for idx, output in enumerate(split_data):
+            try:
+                split_data[idx] = auto_eval_generated_conversations(output)
+            except Exception as e:
+                print(f"Warning: Failed to auto-evaluate dialog {idx}: {e}")
+        
+        # save the outputs
+        print(f"Saving '{split}' split of {len(split_data)} videos")
+        output_file = os.path.join(output_dir, f"{split}.json")
+        with open(output_file, "w") as f:
+            json.dump(split_data, f, indent=2)
+        print(f"Saved to {output_file}")
+
+
 if __name__ == "__main__":
-    parser = HfArgumentParser((EpflPreprocessArgs, SlurmArguments))
-    args, slurm_args = parser.parse_args_into_dataclasses()
+    parser = HfArgumentParser(EpflPreprocessArgs)
+    args = parser.parse_args_into_dataclasses()[0]
+    
+    print("EPFL Dialog Generation - Local Mode")
+    print("=" * 50)
+    print(f"Data directory: {args.data_dir}")
+    print(f"Output directory: {args.output_dir}")
+    print(f"LLM model: {args.llm}")
+    print(f"Splits: {args.splits}")
+    print(f"User types: {args.user_types}")
+    print(f"Force rerun: {args.force_rerun}")
+    print("=" * 50)
     
     # Load annotations
+    print("Loading EPFL annotations...")
     anns_per_split = load_epfl_dataset(args)
     
-    # Convert to the format expected by run_jobs (list of dicts)
+    if not any(anns_per_split.values()):
+        print("No annotations found! Please check your data directory.")
+        exit(1)
+    
+    # Convert to the format expected by processing functions
     anns_per_split_dicts = {}
     for split, annotations in anns_per_split.items():
         anns_per_split_dicts[split] = []
         for ann in annotations:
             anns_per_split_dicts[split].append({
+                "split": split,
                 "participant": ann.original_ann["participant"],
                 "session": ann.original_ann["session"],
                 "annotation_dir": os.path.join(args.data_dir, split, ann.original_ann["participant"], ann.original_ann["session"], "annotations"),
-                "frames_dir": os.path.join(args.frames_dir, ann.original_ann["participant"], ann.original_ann["session"])
+                "video_uid": ann.video_uid
             })
     
-    # Submit the job
-    executor = get_slurm_executor(slurm_args)
-    job = executor.submit(run_jobs, args, anns_per_split_dicts, parse_epfl_annotation_wrapper)
-    
-    # Gather and save results
-    import time
+    # Process locally
+    print("Starting local processing...")
     start_time = time.time()
-    split_outputs_all_tasks = job.results()
-    save_results(job.results(), args.splits, args.output_dir)
-    print(f"Time: {(time.time() - start_time) / 60:.2f} minutes")
+    
+    split_outputs = run_local_jobs(args, anns_per_split_dicts, parse_epfl_annotation_wrapper)
+    
+    # Save results with auto-evaluation
+    os.makedirs(args.output_dir, exist_ok=True)
+    save_local_results(split_outputs, args.splits, args.output_dir)
+    
+    total_time = (time.time() - start_time) / 60
+    print(f"\nProcessing completed in {total_time:.2f} minutes")
+    print("=" * 50)
