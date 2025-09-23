@@ -474,8 +474,8 @@ def collate_fn(examples, processor):
         images=all_images,
         return_tensors="pt",
         padding=True,
-        truncation=True,
-        max_length=2048,
+        truncation=True, # the samples shouldn't exceed max_length (probably...)
+        max_length=8192,
     )
 
     # Create labels for training
