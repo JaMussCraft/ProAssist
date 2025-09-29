@@ -27,6 +27,77 @@ from mmassist.data import build_train_dataset, build_eval_datasets
 from mmassist.data.utils import tensor_to_pil_images
 from mmassist.train.utils import is_global_rank_zero
 
+# W2T token constants
+W2T_TOKEN_ID = 49191  # <|reserved_special_token_0|>
+ASSISTANT_TOKEN_IDS = [9519, 9531, 42]  # "Assistant:"
+END_OF_UTTERANCE_TOKEN_ID = 49279  # <end_of_utterance>
+FAKE_TOKEN_AROUND_IMAGE_ID = 49189  # <fake_token_around_image>
+IMAGE_TOKEN_ID = 49190  # <image>
+GLOBAL_IMG_TOKEN_ID = 49152  # <global-img>
+
+def get_smolvlm_learn_ranges(input_ids, frame_sampling_rate=1.0):
+    """
+    Get learning ranges for SmolVLM tokenized input.
+    
+    Args:
+        input_ids: 1D tensor of token IDs
+        frame_sampling_rate: Sampling rate for negative frames (0.0-1.0)
+    
+    Returns:
+        List of (start_idx, end_idx, label_type) tuples where:
+        - start_idx, end_idx: token position range
+        - label_type: 'assistant' | 'w2t' | 'talk'
+    """
+    if isinstance(input_ids, torch.Tensor):
+        input_ids = input_ids.cpu().numpy()
+    
+    learn_ranges = []
+    seq_len = len(input_ids)
+    
+    # Find assistant text ranges: [9519, 9531, 42] -> 49279
+    i = 0
+    while i < seq_len - 2:
+        # Look for "Assistant:" token sequence
+        if (input_ids[i] == ASSISTANT_TOKEN_IDS[0] and 
+            input_ids[i+1] == ASSISTANT_TOKEN_IDS[1] and 
+            input_ids[i+2] == ASSISTANT_TOKEN_IDS[2]):
+            
+            start_idx = i + 3  # Start after "Assistant:"
+            
+            # Find the end of assistant text (END_OF_UTTERANCE_TOKEN_ID)
+            end_idx = start_idx
+            while end_idx < seq_len and input_ids[end_idx] != END_OF_UTTERANCE_TOKEN_ID:
+                end_idx += 1
+            
+            if end_idx < seq_len:
+                # Include the end_of_utterance token in learning
+                learn_ranges.append((start_idx, end_idx + 1, 'assistant'))
+            i = end_idx
+        else:
+            i += 1
+    
+    # Find frame decision points by looking for pattern: <global-img><image>...<image><fake_token_around_image>
+    # The last <fake_token_around_image> in each frame is where speaking decisions are made
+    i = 0
+    while i < seq_len:
+        if input_ids[i] == GLOBAL_IMG_TOKEN_ID:
+            # Skip any immediate <image> tokens to get to last <fake_token_around_image> of the frame
+            while i < seq_len and input_ids[i] != FAKE_TOKEN_AROUND_IMAGE_ID:
+                i += 1
+                        
+            # If next token is END_OF_UTTERANCE, this is a positive frame (talk)
+            next_token = input_ids[i+1]
+            if next_token == END_OF_UTTERANCE_TOKEN_ID:
+                learn_ranges.append((i, i + 1, 'talk'))
+            else:
+                # This is a negative frame (don't talk) - sample based on sampling rate
+                if frame_sampling_rate >= 1.0 or torch.rand(1).item() < frame_sampling_rate:
+                    learn_ranges.append((i, i + 1, 'w2t'))
+        
+        i += 1
+    
+    return learn_ranges
+
 
 @dataclass
 class SmolVLMModelArguments:
@@ -71,6 +142,9 @@ class SmolVLMDataArguments:
     )
     frame_sampling_ratio: float = field(
         default=0.3, metadata={"help": "Ratio of frames to sample from frame ranges"}
+    )
+    w2t_frame_sampling_rate: float = field(
+        default=0.3, metadata={"help": "Sampling rate for negative frames in w2t learning (0.0-1.0)"}
     )
     context_size_limit: int = field(
         default=7500,
@@ -156,8 +230,10 @@ class ProAssistSmolVLMDataset:
             processed_sample = self._fix_task_knowledge(sample)
 
             # Step 2: Split and convert samples into smolVLM format
-            split_samples = self._split_and_convert_proassist_to_smolvlm(processed_sample)
-            self.split_samples.extend(split_samples)
+            self._split_and_convert_proassist_to_smolvlm(processed_sample)
+
+            print(f"One proassist sample turned into {len(self.split_samples)} smolVLM samples")
+            break
 
     def _fix_task_knowledge(self, sample):
         """Fix task knowledge placement in system messages."""
@@ -296,7 +372,7 @@ class ProAssistSmolVLMDataset:
 
             print("YIPPIE: ")
             print("New turn: ", turn)
-            print("New messages: ", current_messages)
+            # print("New messages: ", current_messages)
             print(f"len(current_images): {len(current_images)}")
 
             # Check if this would exceed our token limit using smolVLM processor
@@ -444,8 +520,8 @@ class ProAssistSmolVLMDataset:
         return image.resize((target_width, target_height))
 
 
-def collate_fn(examples, processor):
-    """Collate function for SmolVLM training."""
+def collate_fn(examples, processor, w2t_frame_sampling_rate=0.3):
+    """Enhanced collate function for SmolVLM training with w2t token support."""
     # Filter out None examples
     examples = [ex for ex in examples if ex is not None]
 
@@ -478,11 +554,32 @@ def collate_fn(examples, processor):
         max_length=8192,
     )
 
-    # Create labels for training
-    labels = batch["input_ids"].clone()
+    # Create labels with advanced w2t masking
+    labels = torch.full_like(batch["input_ids"], -100, dtype=torch.long)
+    print("THIS IS THE SHAPE: ", batch["input_ids"].shape)
+
+    # Process each sample in the batch
+    for i, input_ids in enumerate(batch["input_ids"]):
+        # Get learning ranges for this sample
+        learn_ranges = get_smolvlm_learn_ranges(
+            input_ids, frame_sampling_rate=w2t_frame_sampling_rate
+        )
+        
+        # Apply masking based on range types
+        for start_idx, end_idx, label_type in learn_ranges:
+            if label_type == 'assistant':
+                # Learn from actual assistant tokens
+                labels[i, start_idx:end_idx] = input_ids[start_idx:end_idx]
+            elif label_type == 'w2t':
+                # Learn to predict w2t token at frame decision point
+                labels[i, start_idx] = W2T_TOKEN_ID
+            elif label_type == 'talk':
+                # Learn to predict the actual next token (positive frame)
+                if end_idx < len(input_ids):
+                    labels[i, start_idx] = input_ids[end_idx]
 
     # Mask padding tokens
-    labels[labels == processor.tokenizer.pad_token_id] = -100
+    labels[batch["input_ids"] == processor.tokenizer.pad_token_id] = -100
 
     # Mask image tokens (model shouldn't predict image tokens)
     image_token_id = processor.tokenizer.additional_special_tokens_ids[
@@ -498,9 +595,10 @@ def collate_fn(examples, processor):
 class SmolVLMProAssistTrainer(Trainer):
     """Custom trainer for SmolVLM ProAssist fine-tuning."""
 
-    def __init__(self, processor, *args, **kwargs):
+    def __init__(self, processor, w2t_frame_sampling_rate=0.3, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.processor = processor
+        self.w2t_frame_sampling_rate = w2t_frame_sampling_rate
 
     def get_train_dataloader(self):
         """Override to use custom collate function."""
@@ -510,7 +608,11 @@ class SmolVLMProAssistTrainer(Trainer):
         from functools import partial
         from torch.utils.data import DataLoader
 
-        collate_fn_with_processor = partial(collate_fn, processor=self.processor)
+        collate_fn_with_processor = partial(
+            collate_fn, 
+            processor=self.processor,
+            w2t_frame_sampling_rate=self.w2t_frame_sampling_rate
+        )
 
         return DataLoader(
             self.train_dataset,
@@ -532,7 +634,11 @@ class SmolVLMProAssistTrainer(Trainer):
         from functools import partial
         from torch.utils.data import DataLoader
 
-        collate_fn_with_processor = partial(collate_fn, processor=self.processor)
+        collate_fn_with_processor = partial(
+            collate_fn, 
+            processor=self.processor,
+            w2t_frame_sampling_rate=self.w2t_frame_sampling_rate
+        )
 
         return DataLoader(
             eval_dataset,
@@ -643,6 +749,7 @@ def main():
         print(f"Max sequence length: {data_args.max_seq_length}")
         print(f"4:1 aspect ratio: {data_args.use_4_1_aspect_ratio}")
         print(f"Frame sampling ratio: {data_args.frame_sampling_ratio}")
+        print(f"W2T frame sampling rate: {data_args.w2t_frame_sampling_rate}")
         print(f"Context size limit: {data_args.context_size_limit}")
 
     # Setup model and processor
@@ -699,6 +806,7 @@ def main():
     # Initialize trainer
     trainer = SmolVLMProAssistTrainer(
         processor=processor,
+        w2t_frame_sampling_rate=data_args.w2t_frame_sampling_rate,
         model=model,
         args=training_args,
         train_dataset=smolvlm_train_dataset,
