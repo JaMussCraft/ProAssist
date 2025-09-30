@@ -8,6 +8,7 @@ multi-modal conversation format with temporal video frames.
 import os
 import torch
 import logging
+import pickle
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Union, Literal, Tuple
 import transformers
@@ -131,9 +132,6 @@ class SmolVLMDataArguments:
         default="/projects/beto/swong2/proassist_data/processed_data",
         metadata={"help": "Root directory for ProAssist data"},
     )
-    max_seq_length: int = field(
-        default=8192, metadata={"help": "Maximum sequence length for input"}
-    )
     use_4_1_aspect_ratio: bool = field(
         default=True,
         metadata={
@@ -141,7 +139,7 @@ class SmolVLMDataArguments:
         },
     )
     frame_sampling_ratio: float = field(
-        default=0.3, metadata={"help": "Ratio of frames to sample from frame ranges"}
+        default=0.1, metadata={"help": "Ratio of frames to sample from frame ranges"}
     )
     w2t_frame_sampling_rate: float = field(
         default=0.3, metadata={"help": "Sampling rate for negative frames in w2t learning (0.0-1.0)"}
@@ -196,14 +194,12 @@ class ProAssistSmolVLMDataset:
         self,
         proassist_dataset,
         processor,
-        max_seq_length: int = 8192,
         use_4_1_aspect_ratio: bool = True,
-        frame_sampling_ratio: float = 0.3,
+        frame_sampling_ratio: float = 0.1, # proassist is 2 FPS; this will give 1 frame every 5s
         context_size_limit: int = 7500,  # Leave room for 1-2 turns below 8k
     ):
         self.proassist_dataset = proassist_dataset
         self.processor = processor
-        self.max_seq_length = max_seq_length
         self.use_4_1_aspect_ratio = use_4_1_aspect_ratio
         self.frame_sampling_ratio = frame_sampling_ratio
         self.context_size_limit = context_size_limit
@@ -213,9 +209,46 @@ class ProAssistSmolVLMDataset:
             processor.tokenizer.additional_special_tokens.index("<image>")
         ]
 
-        # Preprocess and split long samples
-        self.split_samples = []
-        self._preprocess_and_split_samples()
+        # Generate cache file path based on dataset and parameters
+        self.cache_file_path = self._generate_cache_file_path()
+        
+        # Try to load existing processed data, otherwise preprocess and split
+        if os.path.exists(self.cache_file_path):
+            print(f"Loading existing processed data from {self.cache_file_path}")
+            self._load_split_samples()
+        else:
+            print(f"Processing data from scratch and saving to {self.cache_file_path}")
+            self.split_samples = []
+            self._preprocess_and_split_samples()
+            self._save_split_samples()
+
+    def _generate_cache_file_path(self):
+        """Generate cache file path based on dataset and parameters."""
+        dataset_full = self.proassist_dataset[0]["dataset"]
+        dataset_parts = dataset_full.split('/')
+        
+        dataset_name, samples = dataset_parts
+        
+        # Create filename with all relevant parameters
+        filename = f"smolvlm_processed_{samples}_4to1_{self.use_4_1_aspect_ratio}_sampling_{self.frame_sampling_ratio}_context_{self.context_size_limit}.pkl"
+        
+        # Create directory path
+        cache_dir = f"/projects/beto/proassist_data/processed_data/{dataset_name}/prepared_smolvlm"
+        os.makedirs(cache_dir, exist_ok=True)
+        
+        return os.path.join(cache_dir, filename)
+    
+    def _load_split_samples(self):
+        """Load split samples from cache file."""
+        with open(self.cache_file_path, 'rb') as f:
+            self.split_samples = pickle.load(f)
+        print(f"Loaded {len(self.split_samples)} split samples from cache")
+    
+    def _save_split_samples(self):
+        """Save split samples to cache file."""
+        with open(self.cache_file_path, 'wb') as f:
+            pickle.dump(self.split_samples, f)
+        print(f"Saved {len(self.split_samples)} split samples to {self.cache_file_path}")
 
     def __len__(self):
         return len(self.split_samples)
@@ -225,6 +258,8 @@ class ProAssistSmolVLMDataset:
 
     def _preprocess_and_split_samples(self):
         """Preprocess samples to handle task knowledge and split long samples."""
+
+        i = 0
         for sample in self.proassist_dataset:
             # Step 1: Fix task knowledge in system messages
             processed_sample = self._fix_task_knowledge(sample)
@@ -232,8 +267,10 @@ class ProAssistSmolVLMDataset:
             # Step 2: Split and convert samples into smolVLM format
             self._split_and_convert_proassist_to_smolvlm(processed_sample)
 
-            print(f"One proassist sample turned into {len(self.split_samples)} smolVLM samples")
-            break
+            print(f"Processed sample {i+1}: now have {len(self.split_samples)} total split samples")
+
+            i += 1
+            # if i > 15: break # temp
 
     def _fix_task_knowledge(self, sample):
         """Fix task knowledge placement in system messages."""
@@ -271,6 +308,34 @@ class ProAssistSmolVLMDataset:
         updated_sample["conversation"] = conversation
         return updated_sample
 
+    def _count_tokens_for_messages(self, messages, images=None):
+        """
+        Count tokens for a list of messages with optional images.
+        Returns (total_tokens, image_tokens).
+        """
+        if not messages:
+            return 0, 0
+            
+        prompt = self.processor.apply_chat_template(
+            messages, add_generation_prompt=False
+        )
+        inputs = self.processor(
+            text=prompt,
+            images=images if images else None,
+            return_tensors="pt",
+        )
+        
+        total_tokens = inputs["input_ids"].shape[1]
+        image_tokens = (inputs["input_ids"] == self.image_token_id).sum().item()
+        return total_tokens, image_tokens
+
+    def _count_tokens_for_single_message(self, message, images=None):
+        """
+        Count tokens for a single message with optional images.
+        Returns (total_tokens, image_tokens).
+        """
+        return self._count_tokens_for_messages([message], images)
+
     def _split_and_convert_proassist_to_smolvlm(self, sample):
         """
         Split a long proassist sample into multiple smaller samples
@@ -285,27 +350,42 @@ class ProAssistSmolVLMDataset:
         current_messages = []
         last_progress_summary = ""
         current_images = []
+        
+        # For incremental token counting optimization
+        current_token_count = 0
+        current_image_token_count = 0
 
         i = 0
         while i < len(conversation):
             turn = conversation[i]
 
-            # Process the turn
+            # Process the turn and update token counts incrementally
+            new_tokens = 0
+            new_image_tokens = 0
+            
             if turn["role"] == "system":
-                current_messages.append(
-                    {
-                        "role": "system",
-                        "content": [{"type": "text", "text": turn["content"]}],
-                    }
-                )
+                new_message = {
+                    "role": "system",
+                    "content": [{"type": "text", "text": turn["content"]}],
+                }
+                current_messages.append(new_message)
+                
+                # Count tokens for this message only
+                msg_tokens, msg_img_tokens = self._count_tokens_for_single_message(new_message)
+                new_tokens += msg_tokens
+                new_image_tokens += msg_img_tokens
 
             elif turn["role"] == "assistant":
-                current_messages.append(
-                    {
-                        "role": "assistant",
-                        "content": [{"type": "text", "text": turn["content"]}],
-                    }
-                )
+                new_message = {
+                    "role": "assistant",
+                    "content": [{"type": "text", "text": turn["content"]}],
+                }
+                current_messages.append(new_message)
+                
+                # Count tokens for this message only
+                msg_tokens, msg_img_tokens = self._count_tokens_for_single_message(new_message)
+                new_tokens += msg_tokens
+                new_image_tokens += msg_img_tokens
 
                 # Save progress summary if available
                 if "progress" in turn:
@@ -315,17 +395,31 @@ class ProAssistSmolVLMDataset:
                 if (
                     current_messages and current_messages[-1]["role"] == "user"
                 ):  # latest turn is user
-                    current_messages[-1]["content"].append(
-                        {"type": "text", "text": turn["content"]}
-                    )
+                    # Adding text to existing user message
+                    new_content = {"type": "text", "text": turn["content"]}
+                    current_messages[-1]["content"].append(new_content)
+                    
+                    # Count tokens for just this new content
+                    temp_message = {
+                        "role": "user",
+                        "content": [new_content]
+                    }
+                    msg_tokens, msg_img_tokens = self._count_tokens_for_single_message(temp_message)
+                    new_tokens += msg_tokens
+                    new_image_tokens += msg_img_tokens
 
                 else:
-                    current_messages.append(
-                        {
-                            "role": "user",
-                            "content": [{"type": "text", "text": turn["content"]}],
-                        }
-                    )
+                    # Creating new user message
+                    new_message = {
+                        "role": "user",
+                        "content": [{"type": "text", "text": turn["content"]}],
+                    }
+                    current_messages.append(new_message)
+                    
+                    # Count tokens for this message only
+                    msg_tokens, msg_img_tokens = self._count_tokens_for_single_message(new_message)
+                    new_tokens += msg_tokens
+                    new_image_tokens += msg_img_tokens
 
             elif turn["role"] == "frames":
                 # Sample frames and add as user message
@@ -351,9 +445,10 @@ class ProAssistSmolVLMDataset:
                         if k < len(images):
                             sampled_images.append(images[k : k + 1])
 
-                    print(f"Sampled {len(sampled_images)} frames from {start} to {end}")
+                    # print(f"Sampled {len(sampled_images)} frames from {start} to {end}")
 
                     sampled_pil_images = []
+                    new_image_content = []
                     for pt_img in sampled_images:
                         pil_img = tensor_to_pil_images(pt_img)[0]
                         pil_img = self.resize_image_for_optimal_encoding(pil_img)
@@ -369,46 +464,84 @@ class ProAssistSmolVLMDataset:
                             )
 
                         current_images.append(pil_img)
+                        sampled_pil_images.append(pil_img)
+                        new_image_content.append({"type": "image"})
+                    
+                    # Count tokens for the new images
+                    if new_image_content:
+                        temp_message = {
+                            "role": "user",
+                            "content": new_image_content
+                        }
+                        msg_tokens, msg_img_tokens = self._count_tokens_for_single_message(
+                            temp_message, sampled_pil_images
+                        )
+                        new_tokens += msg_tokens
+                        new_image_tokens += msg_img_tokens
+            
+            # Update running token counts
+            current_token_count += new_tokens
+            current_image_token_count += new_image_tokens
 
-            print("YIPPIE: ")
-            print("New turn: ", turn)
+            # print("YIPPIE: ")
+            # print("New turn: ", turn)
             # print("New messages: ", current_messages)
-            print(f"len(current_images): {len(current_images)}")
-
-            # Check if this would exceed our token limit using smolVLM processor
-            prompt = self.processor.apply_chat_template(
-                current_messages, add_generation_prompt=False
-            )
-            inputs = self.processor(
-                text=prompt,
-                images=current_images if current_images else None,
-                return_tensors="pt",
-            )
-
-            # Count tokens
-            token_count = inputs["input_ids"].shape[1]
-            print(f"Current messages' total token count: {token_count}")
-            num_image_tokens = (inputs["input_ids"] == self.image_token_id).sum().item()
-            print(f"Current messages' image token count: {num_image_tokens}")
+            # print(f"len(current_images): {len(current_images)}")
+            # print(f"Current token count: {current_token_count} (added {new_tokens})")
+            # print(f"Current image token count: {current_image_token_count} (added {new_image_tokens})")
 
             # add split sample when context_size is reached
-            if current_messages and token_count > self.context_size_limit:
-                # add a system role summary prompt followed by an assistant progress summary turn
-                current_messages.append(
-                    {
-                        "role": "system",
-                        "content": [
-                            {"type": "text", "text": "Please summarize the progress."}
-                        ],
-                    }
-                )
+            if current_messages and current_token_count > self.context_size_limit:
 
-                current_messages.append(
-                    {
-                        "role": "assistant",
-                        "content": [{"type": "text", "text": last_progress_summary}],
-                    }
-                )
+                # remove the latest turn and update token counts
+                # We need to subtract the tokens we just added for this turn
+                current_token_count -= new_tokens
+                current_image_token_count -= new_image_tokens
+                
+                if turn["role"] in ["system", "assistant"]:
+                    current_messages.pop()
+
+                elif turn["role"] == "user":
+                    if len(current_messages[-1]["content"]) == 1:  # added a new turn
+                        current_messages.pop()
+
+                    else:
+                        current_messages[-1]["content"].pop()
+
+                elif turn["role"] == "frames":
+                    if len(current_messages[-1]["content"]) == sampled_frame_count:  # added a new turn
+                        current_messages.pop()
+
+                    else:
+                        for _ in range(sampled_frame_count):
+                            current_messages[-1]["content"].pop()
+
+                    for _ in range(sampled_frame_count):
+                        current_images.pop()
+
+                # leave this turn for the next small sample
+                i -= 1
+
+                # add a system role summary prompt followed by an assistant progress summary turn
+                system_summary_msg = {
+                    "role": "system",
+                    "content": [
+                        {"type": "text", "text": "Please summarize the progress."}
+                    ],
+                }
+                current_messages.append(system_summary_msg)
+                
+                assistant_summary_msg = {
+                    "role": "assistant",
+                    "content": [{"type": "text", "text": last_progress_summary}],
+                }
+                current_messages.append(assistant_summary_msg)
+                
+                # Count tokens for summary messages
+                sys_tokens, sys_img_tokens = self._count_tokens_for_single_message(system_summary_msg)
+                asst_tokens, asst_img_tokens = self._count_tokens_for_single_message(assistant_summary_msg)
+                current_token_count += sys_tokens + asst_tokens
+                current_image_token_count += sys_img_tokens + asst_img_tokens
 
                 # Create new sample
                 split_sample = {
@@ -421,20 +554,29 @@ class ProAssistSmolVLMDataset:
                     },
                 }
 
+                print(f"Added new split sample with {current_token_count} tokens and {len(current_images)} images")
+
                 self.split_samples.append(split_sample)
 
                 # Reset for next sample
                 current_messages = []
                 current_images = []
+                current_token_count = 0
+                current_image_token_count = 0
 
                 # Start new sample with updated system message
-                if last_progress_summary:
-                    system_msg = self._create_system_message(
-                        assistant_instruction,
-                        last_progress_summary,
-                        sample["metadata"]["knowledge"],
-                    )
-                    current_messages.append({"role": "system", "content": system_msg})
+                system_msg = self._create_system_message(
+                    assistant_instruction,
+                    last_progress_summary,
+                    sample["metadata"]["knowledge"],
+                )
+                new_system_message = {"role": "system", "content": system_msg}
+                current_messages.append(new_system_message)
+                
+                # Count tokens for the new system message
+                sys_tokens, sys_img_tokens = self._count_tokens_for_single_message(new_system_message)
+                current_token_count += sys_tokens
+                current_image_token_count += sys_img_tokens
 
             i += 1
 
@@ -450,6 +592,7 @@ class ProAssistSmolVLMDataset:
                 },
             }
 
+            print(f"Added new unfull split sample with {current_token_count} tokens and {len(current_images)} images")
             self.split_samples.append(split_sample)
 
     def _extract_assistant_instruction(self, conversation):
@@ -536,12 +679,30 @@ def collate_fn(examples, processor, w2t_frame_sampling_rate=0.3):
 
         # Apply chat template
         text = processor.apply_chat_template(
-            messages, add_generation_prompt=False, tokenize=False
+            messages, add_generation_prompt=False
         )
         texts.append(text.strip())
 
         # Collect all images from this conversation
         images = example["images"]
+
+
+        # # Count and validate image tokens
+        # image_token_count = text.count('<image>')        
+        # print(f"Sample has {image_token_count} <image> tokens and {len(images)} actual images")
+
+        # # Count tokens
+        # inputs = processor(
+        #     text=text,
+        #     images=images,
+        #     return_tensors="pt",
+        # )
+        # token_count = inputs["input_ids"].shape[1]
+        # print(f"Sample's total token count: {token_count}")
+        # num_image_tokens = (inputs["input_ids"] == IMAGE_TOKEN_ID).sum().item()
+        # print(f"Sample's image token count: {num_image_tokens}")
+        
+
         all_images.append(images)
 
     # Process batch
@@ -556,7 +717,6 @@ def collate_fn(examples, processor, w2t_frame_sampling_rate=0.3):
 
     # Create labels with advanced w2t masking
     labels = torch.full_like(batch["input_ids"], -100, dtype=torch.long)
-    print("THIS IS THE SHAPE: ", batch["input_ids"].shape)
 
     # Process each sample in the batch
     for i, input_ids in enumerate(batch["input_ids"]):
@@ -588,6 +748,7 @@ def collate_fn(examples, processor, w2t_frame_sampling_rate=0.3):
     labels[labels == image_token_id] = -100
 
     batch["labels"] = labels
+
 
     return batch
 
@@ -746,7 +907,6 @@ def main():
         print(f"Freeze Vision: {model_args.freeze_vision}")
         print(f"Train datasets: {data_args.train_datasets}")
         print(f"Eval datasets: {data_args.eval_datasets}")
-        print(f"Max sequence length: {data_args.max_seq_length}")
         print(f"4:1 aspect ratio: {data_args.use_4_1_aspect_ratio}")
         print(f"Frame sampling ratio: {data_args.frame_sampling_ratio}")
         print(f"W2T frame sampling rate: {data_args.w2t_frame_sampling_rate}")
@@ -773,23 +933,27 @@ def main():
         build_eval_datasets(**all_args_dict) if data_args.eval_datasets else {}
     )
 
+    from torch.utils.data import Subset
+
     # Convert to SmolVLM format
+    print("Initializing SmolVLM train dataset...")
     smolvlm_train_dataset = ProAssistSmolVLMDataset(
-        train_dataset,
+        Subset(train_dataset, range(0, 175)), # temp
+        # train_dataset,
         processor,
-        max_seq_length=data_args.max_seq_length,
         use_4_1_aspect_ratio=data_args.use_4_1_aspect_ratio,
         frame_sampling_ratio=data_args.frame_sampling_ratio,
         context_size_limit=data_args.context_size_limit,
     )
 
+    print("Initializing SmolVLM eval dataset...")
     smolvlm_eval_dataset = None
     if eval_datasets:
         eval_dataset = list(eval_datasets.values())[0]  # Use first eval dataset
         smolvlm_eval_dataset = ProAssistSmolVLMDataset(
-            eval_dataset,
+            Subset(eval_dataset, range(0, 10)), # temp
+            # eval_dataset,
             processor,
-            max_seq_length=data_args.max_seq_length,
             use_4_1_aspect_ratio=data_args.use_4_1_aspect_ratio,
             frame_sampling_ratio=data_args.frame_sampling_ratio,
             context_size_limit=data_args.context_size_limit,
