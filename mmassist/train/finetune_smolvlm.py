@@ -9,6 +9,7 @@ import os
 import torch
 import logging
 import pickle
+import numpy as np
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Union, Literal, Tuple
 import transformers
@@ -27,6 +28,8 @@ from mmassist.configs import parse_args
 from mmassist.data import build_train_dataset, build_eval_datasets
 from mmassist.data.utils import tensor_to_pil_images
 from mmassist.train.utils import is_global_rank_zero
+from mmassist.train.proassist_smolvlm_dataset import ProAssistSmolVLMDataset
+
 
 # W2T token constants
 W2T_TOKEN_ID = 49191  # <|reserved_special_token_0|>
@@ -184,485 +187,6 @@ class LoraArguments:
     use_dora: bool = field(default=False)
 
 
-class ProAssistSmolVLMDataset:
-    """Dataset adapter for ProAssist data to SmolVLM format.
-
-    The proassist samples are both split and converted to SmolVLM format at the same time.
-    """
-
-    def __init__(
-        self,
-        proassist_dataset,
-        processor,
-        use_4_1_aspect_ratio: bool = True,
-        frame_sampling_ratio: float = 0.1, # proassist is 2 FPS; this will give 1 frame every 5s
-        context_size_limit: int = 7500,  # Leave room for 1-2 turns below 8k
-    ):
-        self.proassist_dataset = proassist_dataset
-        self.processor = processor
-        self.use_4_1_aspect_ratio = use_4_1_aspect_ratio
-        self.frame_sampling_ratio = frame_sampling_ratio
-        self.context_size_limit = context_size_limit
-
-        # Get image token ID for masking
-        self.image_token_id = processor.tokenizer.additional_special_tokens_ids[
-            processor.tokenizer.additional_special_tokens.index("<image>")
-        ]
-
-        # Generate cache file path based on dataset and parameters
-        self.cache_file_path = self._generate_cache_file_path()
-        
-        # Try to load existing processed data, otherwise preprocess and split
-        if os.path.exists(self.cache_file_path):
-            print(f"Loading existing processed data from {self.cache_file_path}")
-            self._load_split_samples()
-        else:
-            print(f"Processing data from scratch and saving to {self.cache_file_path}")
-            self.split_samples = []
-            self._preprocess_and_split_samples()
-            self._save_split_samples()
-
-    def _generate_cache_file_path(self):
-        """Generate cache file path based on dataset and parameters."""
-        dataset_full = self.proassist_dataset[0]["dataset"]
-        dataset_parts = dataset_full.split('/')
-        
-        dataset_name, samples = dataset_parts
-        
-        # Create filename with all relevant parameters
-        filename = f"smolvlm_processed_{samples}_4to1_{self.use_4_1_aspect_ratio}_sampling_{self.frame_sampling_ratio}_context_{self.context_size_limit}.pkl"
-        
-        # Create directory path
-        cache_dir = f"/projects/beto/proassist_data/processed_data/{dataset_name}/prepared_smolvlm"
-        os.makedirs(cache_dir, exist_ok=True)
-        
-        return os.path.join(cache_dir, filename)
-    
-    def _load_split_samples(self):
-        """Load split samples from cache file."""
-        with open(self.cache_file_path, 'rb') as f:
-            self.split_samples = pickle.load(f)
-        print(f"Loaded {len(self.split_samples)} split samples from cache")
-    
-    def _save_split_samples(self):
-        """Save split samples to cache file."""
-        with open(self.cache_file_path, 'wb') as f:
-            pickle.dump(self.split_samples, f)
-        print(f"Saved {len(self.split_samples)} split samples to {self.cache_file_path}")
-
-    def __len__(self):
-        return len(self.split_samples)
-
-    def __getitem__(self, idx):
-        return self.split_samples[idx]
-
-    def _preprocess_and_split_samples(self):
-        """Preprocess samples to handle task knowledge and split long samples."""
-
-        i = 0
-        for sample in self.proassist_dataset:
-            # Step 1: Fix task knowledge in system messages
-            processed_sample = self._fix_task_knowledge(sample)
-
-            # Step 2: Split and convert samples into smolVLM format
-            self._split_and_convert_proassist_to_smolvlm(processed_sample)
-
-            print(f"Processed sample {i+1}: now have {len(self.split_samples)} total split samples")
-
-            i += 1
-            # if i > 15: break # temp
-
-    def _fix_task_knowledge(self, sample):
-        """Fix task knowledge placement in system messages."""
-        conversation = sample["conversation"].copy()
-        task_knowledge = f"Task knowledge: {sample['metadata']['knowledge']}"
-
-        # Find and process system messages
-        first_system_idx = None
-        second_system_idx = None
-
-        for i, turn in enumerate(conversation):
-            if turn["role"] == "system":
-                if first_system_idx is None:
-                    first_system_idx = i
-                else:
-                    second_system_idx = i
-                    break
-
-        # Remove second system turn if it contains "Task knowledge: "
-        if (
-            second_system_idx is not None
-            and "Task knowledge: " in conversation[second_system_idx]["content"]
-        ):
-            conversation.pop(second_system_idx)
-
-        # Add task knowledge to first system turn if not already present
-        first_system_content = conversation[first_system_idx]["content"]
-        if "Task knowledge: " not in first_system_content:
-            conversation[first_system_idx][
-                "content"
-            ] = f"{first_system_content} {task_knowledge}"
-
-        # Create updated sample
-        updated_sample = sample.copy()
-        updated_sample["conversation"] = conversation
-        return updated_sample
-
-    def _count_tokens_for_messages(self, messages, images=None):
-        """
-        Count tokens for a list of messages with optional images.
-        Returns (total_tokens, image_tokens).
-        """
-        if not messages:
-            return 0, 0
-            
-        prompt = self.processor.apply_chat_template(
-            messages, add_generation_prompt=False
-        )
-        inputs = self.processor(
-            text=prompt,
-            images=images if images else None,
-            return_tensors="pt",
-        )
-        
-        total_tokens = inputs["input_ids"].shape[1]
-        image_tokens = (inputs["input_ids"] == self.image_token_id).sum().item()
-        return total_tokens, image_tokens
-
-    def _count_tokens_for_single_message(self, message, images=None):
-        """
-        Count tokens for a single message with optional images.
-        Returns (total_tokens, image_tokens).
-        """
-        return self._count_tokens_for_messages([message], images)
-
-    def _split_and_convert_proassist_to_smolvlm(self, sample):
-        """
-        Split a long proassist sample into multiple smaller samples
-        while converting to smolVLM format.
-        """
-        conversation = sample["conversation"]
-        images = sample.get("images", [])
-
-        # Extract assistant instruction from first system message
-        assistant_instruction = self._extract_assistant_instruction(conversation)
-
-        current_messages = []
-        last_progress_summary = ""
-        current_images = []
-        
-        # For incremental token counting optimization
-        current_token_count = 0
-        current_image_token_count = 0
-
-        i = 0
-        while i < len(conversation):
-            turn = conversation[i]
-
-            # Process the turn and update token counts incrementally
-            new_tokens = 0
-            new_image_tokens = 0
-            
-            if turn["role"] == "system":
-                new_message = {
-                    "role": "system",
-                    "content": [{"type": "text", "text": turn["content"]}],
-                }
-                current_messages.append(new_message)
-                
-                # Count tokens for this message only
-                msg_tokens, msg_img_tokens = self._count_tokens_for_single_message(new_message)
-                new_tokens += msg_tokens
-                new_image_tokens += msg_img_tokens
-
-            elif turn["role"] == "assistant":
-                new_message = {
-                    "role": "assistant",
-                    "content": [{"type": "text", "text": turn["content"]}],
-                }
-                current_messages.append(new_message)
-                
-                # Count tokens for this message only
-                msg_tokens, msg_img_tokens = self._count_tokens_for_single_message(new_message)
-                new_tokens += msg_tokens
-                new_image_tokens += msg_img_tokens
-
-                # Save progress summary if available
-                if "progress" in turn:
-                    last_progress_summary = turn["progress"]
-
-            elif turn["role"] == "user":
-                if (
-                    current_messages and current_messages[-1]["role"] == "user"
-                ):  # latest turn is user
-                    # Adding text to existing user message
-                    new_content = {"type": "text", "text": turn["content"]}
-                    current_messages[-1]["content"].append(new_content)
-                    
-                    # Count tokens for just this new content
-                    temp_message = {
-                        "role": "user",
-                        "content": [new_content]
-                    }
-                    msg_tokens, msg_img_tokens = self._count_tokens_for_single_message(temp_message)
-                    new_tokens += msg_tokens
-                    new_image_tokens += msg_img_tokens
-
-                else:
-                    # Creating new user message
-                    new_message = {
-                        "role": "user",
-                        "content": [{"type": "text", "text": turn["content"]}],
-                    }
-                    current_messages.append(new_message)
-                    
-                    # Count tokens for this message only
-                    msg_tokens, msg_img_tokens = self._count_tokens_for_single_message(new_message)
-                    new_tokens += msg_tokens
-                    new_image_tokens += msg_img_tokens
-
-            elif turn["role"] == "frames":
-                # Sample frames and add as user message
-                start = turn["start"] - sample["start_frame_idx"]
-                end = turn["end"] - sample["start_frame_idx"]
-
-                num_frames = max(0, min(end, len(images)) - max(0, start))
-
-                # Sample frames based on sampling ratio
-                sampled_frame_count = max(
-                    1, int(num_frames * self.frame_sampling_ratio)
-                )
-
-                if sampled_frame_count > 0:
-                    step = max(1, num_frames // sampled_frame_count)
-                    frame_indices = list(range(start, min(end, len(images)), step))[
-                        :sampled_frame_count
-                    ]
-
-                    # Get actual image tensors
-                    sampled_images = []
-                    for k in frame_indices:
-                        if k < len(images):
-                            sampled_images.append(images[k : k + 1])
-
-                    # print(f"Sampled {len(sampled_images)} frames from {start} to {end}")
-
-                    sampled_pil_images = []
-                    new_image_content = []
-                    for pt_img in sampled_images:
-                        pil_img = tensor_to_pil_images(pt_img)[0]
-                        pil_img = self.resize_image_for_optimal_encoding(pil_img)
-
-                        if (
-                            current_messages and current_messages[-1]["role"] == "user"
-                        ):  # latest turn is user
-                            current_messages[-1]["content"].append({"type": "image"})
-
-                        else:
-                            current_messages.append(
-                                {"role": "user", "content": [{"type": "image"}]}
-                            )
-
-                        current_images.append(pil_img)
-                        sampled_pil_images.append(pil_img)
-                        new_image_content.append({"type": "image"})
-                    
-                    # Count tokens for the new images
-                    if new_image_content:
-                        temp_message = {
-                            "role": "user",
-                            "content": new_image_content
-                        }
-                        msg_tokens, msg_img_tokens = self._count_tokens_for_single_message(
-                            temp_message, sampled_pil_images
-                        )
-                        new_tokens += msg_tokens
-                        new_image_tokens += msg_img_tokens
-            
-            # Update running token counts
-            current_token_count += new_tokens
-            current_image_token_count += new_image_tokens
-
-            # print("YIPPIE: ")
-            # print("New turn: ", turn)
-            # print("New messages: ", current_messages)
-            # print(f"len(current_images): {len(current_images)}")
-            # print(f"Current token count: {current_token_count} (added {new_tokens})")
-            # print(f"Current image token count: {current_image_token_count} (added {new_image_tokens})")
-
-            # add split sample when context_size is reached
-            if current_messages and current_token_count > self.context_size_limit:
-
-                # remove the latest turn and update token counts
-                # We need to subtract the tokens we just added for this turn
-                current_token_count -= new_tokens
-                current_image_token_count -= new_image_tokens
-                
-                if turn["role"] in ["system", "assistant"]:
-                    current_messages.pop()
-
-                elif turn["role"] == "user":
-                    if len(current_messages[-1]["content"]) == 1:  # added a new turn
-                        current_messages.pop()
-
-                    else:
-                        current_messages[-1]["content"].pop()
-
-                elif turn["role"] == "frames":
-                    if len(current_messages[-1]["content"]) == sampled_frame_count:  # added a new turn
-                        current_messages.pop()
-
-                    else:
-                        for _ in range(sampled_frame_count):
-                            current_messages[-1]["content"].pop()
-
-                    for _ in range(sampled_frame_count):
-                        current_images.pop()
-
-                # leave this turn for the next small sample
-                i -= 1
-
-                # add a system role summary prompt followed by an assistant progress summary turn
-                system_summary_msg = {
-                    "role": "system",
-                    "content": [
-                        {"type": "text", "text": "Please summarize the progress."}
-                    ],
-                }
-                current_messages.append(system_summary_msg)
-                
-                assistant_summary_msg = {
-                    "role": "assistant",
-                    "content": [{"type": "text", "text": last_progress_summary}],
-                }
-                current_messages.append(assistant_summary_msg)
-                
-                # Count tokens for summary messages
-                sys_tokens, sys_img_tokens = self._count_tokens_for_single_message(system_summary_msg)
-                asst_tokens, asst_img_tokens = self._count_tokens_for_single_message(assistant_summary_msg)
-                current_token_count += sys_tokens + asst_tokens
-                current_image_token_count += sys_img_tokens + asst_img_tokens
-
-                # Create new sample
-                split_sample = {
-                    "messages": current_messages,
-                    "images": current_images,
-                    "sample_metadata": {
-                        "sample_idx": sample.get("sample_idx", -1),
-                        "video_uid": sample.get("video_uid", "unknown"),
-                        "num_frames": len(current_images),
-                    },
-                }
-
-                print(f"Added new split sample with {current_token_count} tokens and {len(current_images)} images")
-
-                self.split_samples.append(split_sample)
-
-                # Reset for next sample
-                current_messages = []
-                current_images = []
-                current_token_count = 0
-                current_image_token_count = 0
-
-                # Start new sample with updated system message
-                system_msg = self._create_system_message(
-                    assistant_instruction,
-                    last_progress_summary,
-                    sample["metadata"]["knowledge"],
-                )
-                new_system_message = {"role": "system", "content": system_msg}
-                current_messages.append(new_system_message)
-                
-                # Count tokens for the new system message
-                sys_tokens, sys_img_tokens = self._count_tokens_for_single_message(new_system_message)
-                current_token_count += sys_tokens
-                current_image_token_count += sys_img_tokens
-
-            i += 1
-
-        # Add unfull/remaining messages as a final sample
-        if current_messages:
-            split_sample = split_sample = {
-                "messages": current_messages,
-                "images": current_images,
-                "sample_metadata": {
-                    "sample_idx": sample.get("sample_idx", -1),
-                    "video_uid": sample.get("video_uid", "unknown"),
-                    "num_frames": len(current_images),
-                },
-            }
-
-            print(f"Added new unfull split sample with {current_token_count} tokens and {len(current_images)} images")
-            self.split_samples.append(split_sample)
-
-    def _extract_assistant_instruction(self, conversation):
-        """Extract assistant instruction from first system message."""
-        for turn in conversation:
-            if turn["role"] == "system":
-                content = turn["content"]
-
-                # Remove progress summary part
-                if "The time elapsed since" in content:
-                    content = content.split("The time elapsed since")[0].strip()
-
-                # Remove task knowledge part
-                if "Task knowledge: " in content:
-                    content = content.split("Task knowledge: ")[0].strip()
-
-                return content
-
-        # default
-        return "You are a helpful and proactive assistant. Always be ready to assist and provide useful information ahead of time."
-
-    def _process_frames_turn_with_images(self, turn, sample, images):
-        """Process frames turn and return both text content and actual images."""
-        start = turn["start"] - sample["start_frame_idx"]
-        end = turn["end"] - sample["start_frame_idx"]
-
-        num_frames = max(0, min(end, len(images)) - max(0, start))
-        if num_frames == 0:
-            return "", []
-
-        # Sample frames based on sampling ratio
-        sampled_frame_count = max(1, int(num_frames * self.frame_sampling_ratio))
-
-        if sampled_frame_count > 0:
-            step = max(1, num_frames // sampled_frame_count)
-            frame_indices = list(range(start, min(end, len(images)), step))[
-                :sampled_frame_count
-            ]
-
-            # Get actual image tensors
-            sampled_images = []
-            for k in frame_indices:
-                if k < len(images):
-                    sampled_images.append(images[k])
-
-            frame_content = (
-                f"[Frames from {start} to {end}, sampled {len(sampled_images)} frames]"
-            )
-            return frame_content, sampled_images
-
-        return "", []
-
-    def _create_system_message(
-        self, assistant_instruction, progress_summary, knowledge
-    ):
-        """Create system message with instruction, progress, and knowledge."""
-        return f"{assistant_instruction}\n\n{progress_summary}\n\nTask knowledge: {knowledge}"
-
-    def resize_image_for_optimal_encoding(self, image):
-        """Resize image to 4:1 aspect ratio for optimal SmolVLM encoding."""
-        if not self.use_4_1_aspect_ratio:
-            return image
-
-        # Calculate target dimensions maintaining 4:1 ratio
-        target_width = 384
-        target_height = target_width // 4  # 4:1 ratio
-
-        return image.resize((target_width, target_height))
-
-
 def collate_fn(examples, processor, w2t_frame_sampling_rate=0.3):
     """Enhanced collate function for SmolVLM training with w2t token support."""
     # Filter out None examples
@@ -810,11 +334,141 @@ class SmolVLMProAssistTrainer(Trainer):
             pin_memory=self.args.dataloader_pin_memory,
         )
 
+    def evaluate_speaking_decisions(self, eval_dataset=None):
+        """
+        Evaluate model performance on speaking decision prediction (w2t token prediction).
+        
+        Returns:
+            dict: Evaluation metrics including accuracy, precision, recall, F1
+        """
+        import torch.nn.functional as F
+        from sklearn.metrics import accuracy_score, precision_recall_fscore_support, confusion_matrix
+        
+        if eval_dataset is None:
+            eval_dataset = self.eval_dataset
+            
+        if eval_dataset is None:
+            raise ValueError("No evaluation dataset provided")
+        
+        logger = logging.getLogger(__name__)
+        logger.info("Starting speaking decision evaluation...")
+        
+        self.model.eval()
+        
+        all_predictions = []
+        all_targets = []
+        total_w2t_positions = 0
+        total_talk_positions = 0
+        
+        eval_dataloader = self.get_eval_dataloader(eval_dataset)
+        
+        with torch.no_grad():
+            for batch_idx, batch in enumerate(eval_dataloader):
+                if batch is None:
+                    continue
+                    
+                # Move batch to device
+                input_ids = batch["input_ids"].to(self.model.device)
+                attention_mask = batch["attention_mask"].to(self.model.device)
+                pixel_values = batch["pixel_values"].to(self.model.device) if "pixel_values" in batch else None
+                
+                # Get model predictions
+                outputs = self.model(
+                    input_ids=input_ids,
+                    attention_mask=attention_mask,
+                    pixel_values=pixel_values
+                )
+                
+                logits = outputs.logits  # [batch_size, seq_len, vocab_size]
+                
+                # Process each sample in the batch
+                for i, sample_input_ids in enumerate(input_ids):
+                    # Get learning ranges for this sample (same as training)
+                    learn_ranges = get_smolvlm_learn_ranges(
+                        sample_input_ids, 
+                        frame_sampling_rate=self.w2t_frame_sampling_rate
+                    )
+                    
+                    # Extract speaking decision positions and predictions
+                    for start_idx, end_idx, label_type in learn_ranges:
+                        if label_type in ['w2t', 'talk']:
+                            if start_idx < logits.shape[1]:
+                                # Get prediction at decision point
+                                position_logits = logits[i, start_idx]  # [vocab_size]
+                                
+                                # Get probabilities for W2T vs other tokens
+                                probs = F.softmax(position_logits, dim=-1)
+                                w2t_prob = probs[W2T_TOKEN_ID].item()
+                                
+                                # Prediction: speak if w2t_prob < 0.5, else wait
+                                predicted_speak = w2t_prob < 0.5
+                                
+                                # Ground truth: speak if label_type is 'talk'
+                                true_speak = (label_type == 'talk')
+                                
+                                all_predictions.append(predicted_speak)
+                                all_targets.append(true_speak)
+                                
+                                if label_type == 'w2t':
+                                    total_w2t_positions += 1
+                                else:  # 'talk'
+                                    total_talk_positions += 1
+                
+                if batch_idx % 10 == 0:
+                    logger.info(f"Processed batch {batch_idx + 1}/{len(eval_dataloader)}")
+        
+        if not all_predictions:
+            logger.warning("No speaking decision positions found in evaluation data")
+            return {}
+        
+        # Calculate metrics
+        accuracy = accuracy_score(all_targets, all_predictions)
+        precision, recall, f1, _ = precision_recall_fscore_support(
+            all_targets, all_predictions, average='binary', zero_division=0
+        )
+        
+        # Confusion matrix
+        tn, fp, fn, tp = confusion_matrix(all_targets, all_predictions).ravel()
+        
+        # Additional metrics
+        specificity = tn / (tn + fp) if (tn + fp) > 0 else 0.0
+        
+        metrics = {
+            'speaking_decision_accuracy': accuracy,
+            'speaking_decision_precision': precision,
+            'speaking_decision_recall': recall,
+            'speaking_decision_f1': f1,
+            'speaking_decision_specificity': specificity,
+            'total_decision_points': len(all_predictions),
+            'total_w2t_positions': total_w2t_positions,
+            'total_talk_positions': total_talk_positions,
+            'true_positives': tp,
+            'true_negatives': tn,
+            'false_positives': fp,
+            'false_negatives': fn
+        }
+        
+        logger.info("Speaking Decision Evaluation Results:")
+        logger.info(f"  Accuracy: {accuracy:.4f}")
+        logger.info(f"  Precision: {precision:.4f}")
+        logger.info(f"  Recall: {recall:.4f}")
+        logger.info(f"  F1-Score: {f1:.4f}")
+        logger.info(f"  Specificity: {specificity:.4f}")
+        logger.info(f"  Total decision points: {len(all_predictions)}")
+        logger.info(f"  W2T positions: {total_w2t_positions}")
+        logger.info(f"  Talk positions: {total_talk_positions}")
+        logger.info(f"  Confusion Matrix: TP={tp}, TN={tn}, FP={fp}, FN={fn}")
+        
+        self.model.train()  # Reset to training mode
+        return metrics
+
 
 def setup_model_and_processor(
     model_args: SmolVLMModelArguments, lora_args: LoraArguments
 ):
     """Setup SmolVLM model and processor with optional LoRA."""
+    
+    logger = logging.getLogger(__name__)
 
     # Load processor
     processor = AutoProcessor.from_pretrained(model_args.model_name_or_path)
@@ -843,7 +497,7 @@ def setup_model_and_processor(
         for param in model.model.vision_model.parameters():
             param.requires_grad = False
         if is_global_rank_zero():
-            print("Vision encoder frozen")
+            logger.info("Vision encoder frozen")
 
     # Setup LoRA if requested
     if model_args.use_lora or model_args.use_qlora:
@@ -869,7 +523,7 @@ def setup_model_and_processor(
                 p.numel() for p in model.parameters() if p.requires_grad
             )
             total_params = sum(p.numel() for p in model.parameters())
-            print(
+            logger.info(
                 f"Trainable parameters: {trainable_params:,} ({trainable_params/total_params*100:.2f}%)"
             )
 
@@ -891,26 +545,36 @@ def main():
     )
 
     # Set up logging
+    log_file = os.path.join(training_args.output_dir, "training.log")
+    os.makedirs(training_args.output_dir, exist_ok=True)
+    
+    # Configure logging to both file and console
     logging.basicConfig(
+        level=logging.INFO if training_args.local_rank in [-1, 0] else logging.WARN,
         format="%(asctime)s - %(levelname)s - %(name)s - %(message)s",
         datefmt="%m/%d/%Y %H:%M:%S",
-        level=logging.INFO if training_args.local_rank in [-1, 0] else logging.WARN,
+        handlers=[
+            logging.FileHandler(log_file),
+            logging.StreamHandler()  # Keep console output
+        ]
     )
+    
+    logger = logging.getLogger(__name__)
 
     if is_global_rank_zero():
-        print("=" * 50)
-        print("SmolVLM ProAssist Fine-tuning")
-        print("=" * 50)
-        print(f"Model: {model_args.model_name_or_path}")
-        print(f"Use LoRA: {model_args.use_lora}")
-        print(f"Use QLoRA: {model_args.use_qlora}")
-        print(f"Freeze Vision: {model_args.freeze_vision}")
-        print(f"Train datasets: {data_args.train_datasets}")
-        print(f"Eval datasets: {data_args.eval_datasets}")
-        print(f"4:1 aspect ratio: {data_args.use_4_1_aspect_ratio}")
-        print(f"Frame sampling ratio: {data_args.frame_sampling_ratio}")
-        print(f"W2T frame sampling rate: {data_args.w2t_frame_sampling_rate}")
-        print(f"Context size limit: {data_args.context_size_limit}")
+        logger.info("=" * 50)
+        logger.info("SmolVLM ProAssist Fine-tuning")
+        logger.info("=" * 50)
+        logger.info(f"Model: {model_args.model_name_or_path}")
+        logger.info(f"Use LoRA: {model_args.use_lora}")
+        logger.info(f"Use QLoRA: {model_args.use_qlora}")
+        logger.info(f"Freeze Vision: {model_args.freeze_vision}")
+        logger.info(f"Train datasets: {data_args.train_datasets}")
+        logger.info(f"Eval datasets: {data_args.eval_datasets}")
+        logger.info(f"4:1 aspect ratio: {data_args.use_4_1_aspect_ratio}")
+        logger.info(f"Frame sampling ratio: {data_args.frame_sampling_ratio}")
+        logger.info(f"W2T frame sampling rate: {data_args.w2t_frame_sampling_rate}")
+        logger.info(f"Context size limit: {data_args.context_size_limit}")
 
     # Setup model and processor
     model, processor = setup_model_and_processor(model_args, lora_args)
@@ -926,7 +590,7 @@ def main():
     }
 
     if is_global_rank_zero():
-        print("\nLoading ProAssist datasets...")
+        logger.info("Loading ProAssist datasets...")
 
     train_dataset = build_train_dataset(**all_args_dict)
     eval_datasets = (
@@ -936,23 +600,23 @@ def main():
     from torch.utils.data import Subset
 
     # Convert to SmolVLM format
-    print("Initializing SmolVLM train dataset...")
+    logger.info("Initializing SmolVLM train dataset...")
     smolvlm_train_dataset = ProAssistSmolVLMDataset(
-        Subset(train_dataset, range(0, 175)), # temp
-        # train_dataset,
+        # Subset(train_dataset, range(0, 10)), # temp
+        train_dataset,
         processor,
         use_4_1_aspect_ratio=data_args.use_4_1_aspect_ratio,
         frame_sampling_ratio=data_args.frame_sampling_ratio,
         context_size_limit=data_args.context_size_limit,
     )
 
-    print("Initializing SmolVLM eval dataset...")
+    logger.info("Initializing SmolVLM eval dataset...")
     smolvlm_eval_dataset = None
     if eval_datasets:
         eval_dataset = list(eval_datasets.values())[0]  # Use first eval dataset
         smolvlm_eval_dataset = ProAssistSmolVLMDataset(
-            Subset(eval_dataset, range(0, 10)), # temp
-            # eval_dataset,
+            # Subset(eval_dataset, range(0, 10)), # temp
+            eval_dataset,
             processor,
             use_4_1_aspect_ratio=data_args.use_4_1_aspect_ratio,
             frame_sampling_ratio=data_args.frame_sampling_ratio,
@@ -960,12 +624,12 @@ def main():
         )
 
     if is_global_rank_zero():
-        print(f"\nOriginal train dataset size: {len(train_dataset)}")
-        print(f"Split train dataset size: {len(smolvlm_train_dataset)}")
+        logger.info(f"Original train dataset size: {len(train_dataset)}")
+        logger.info(f"Split train dataset size: {len(smolvlm_train_dataset)}")
         if smolvlm_eval_dataset:
             eval_dataset_size = len(list(eval_datasets.values())[0])
-            print(f"Original eval dataset size: {eval_dataset_size}")
-            print(f"Split eval dataset size: {len(smolvlm_eval_dataset)}")
+            logger.info(f"Original eval dataset size: {eval_dataset_size}")
+            logger.info(f"Split eval dataset size: {len(smolvlm_eval_dataset)}")
 
     # Initialize trainer
     trainer = SmolVLMProAssistTrainer(
@@ -977,11 +641,24 @@ def main():
         eval_dataset=smolvlm_eval_dataset,
     )
 
+
+    logger.info("DONE CONVERTING!")
+    return # temp for converting proassist dataset to smolvlm format
+
     # Start training
     if is_global_rank_zero():
-        print("\nStarting training...")
+        logger.info("Starting training...")
 
     trainer.train()
+
+    # Evaluate speaking decisions after training
+    if smolvlm_eval_dataset and is_global_rank_zero():
+        logger.info("Evaluating speaking decisions...")
+        eval_metrics = trainer.evaluate_speaking_decisions(smolvlm_eval_dataset)
+        
+        # Log metrics to tensorboard if available
+        if hasattr(trainer, 'log'):
+            trainer.log(eval_metrics)
 
     # Save final model
     if training_args.local_rank == 0:
@@ -989,7 +666,7 @@ def main():
         processor.save_pretrained(training_args.output_dir)
 
         if is_global_rank_zero():
-            print(f"Model saved to {training_args.output_dir}")
+            logger.info(f"Model saved to {training_args.output_dir}")
 
 
 if __name__ == "__main__":
