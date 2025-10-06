@@ -193,8 +193,26 @@ class ProAssistSmolVLMDataset:
         """
         Count tokens for a single message with optional images.
         Returns (total_tokens, image_tokens).
+        
+        Uses a fixed token count (320) per image for efficiency instead of
+        actually processing images through the processor.
         """
-        return self._count_tokens_for_messages([message], images)
+        # For image-only messages, use fixed token count per image
+        if images and len(images) > 0:
+            # Check if this is an image-only message
+            is_image_only = all(
+                content.get("type") == "image" 
+                for content in message.get("content", [])
+            )
+            
+            if is_image_only:
+                # Each image is assumed to be encoded into 320 tokens
+                num_images = len(images)
+                image_tokens = num_images * 320
+                return image_tokens, image_tokens
+        
+        # For text or mixed messages, process normally
+        return self._count_tokens_for_messages([message], images=None)
 
     def _split_and_convert_proassist_to_smolvlm(self, sample):
         """

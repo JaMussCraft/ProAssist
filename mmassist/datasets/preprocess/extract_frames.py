@@ -164,6 +164,39 @@ def get_epfl_video_files(args) -> tuple[list[list[str]], list[str]]:
     return video_files, output_files
 
 
+def get_egoexo4d_video_files(args) -> tuple[list[list[str]], list[str]]:
+    """
+    Get EgoExo4D video files organized by take/frame_aligned_videos/downscaled/resolution.
+    Structure: takes/{take_name}/frame_aligned_videos/downscaled/448/{camera}.mp4
+    Output files named: {take_name}_downscaled_{camera}.arrow
+    Example: fair_cooking_05_2_downscaled_aria02_214-1.arrow
+    """
+    video_files = []
+    video_ids = []
+    
+    # Iterate through takes
+    take_dirs = [d for d in os.listdir(args.video_dir) if os.path.isdir(os.path.join(args.video_dir, d))]
+    
+    for take_name in take_dirs:
+        # Path to downscaled videos: take_name/frame_aligned_videos/downscaled/448/
+        videos_dir = os.path.join(args.video_dir, take_name, "frame_aligned_videos", "downscaled", "448")
+        
+        if not os.path.exists(videos_dir):
+            continue
+            
+        # Process each video in the take
+        for video_file in os.listdir(videos_dir):
+            if video_file.endswith('.mp4'):
+                camera_name = video_file.replace('.mp4', '')
+                video_path = os.path.join(videos_dir, video_file)
+                
+                video_files.append([video_path])
+                video_ids.append(f"{take_name}_downscaled_{camera_name}")
+    
+    output_files = [os.path.join(args.output_dir, f"{vid_id}.arrow") for vid_id in video_ids]
+    return video_files, output_files
+
+
 def get_custom_video_files(args) -> tuple[list[list[str]], list[str]]:
     video_files = [
         os.path.join(args.video_dir, "P29/videos", "P29_01.MP4"),
@@ -185,6 +218,7 @@ dataset_to_get_func = {
     "wtag": get_wtag_video_files,
     "assembly101": get_assembly101_video_files,
     "epfl": get_epfl_video_files,
+    "egoexo4d": get_egoexo4d_video_files,
     "custom": get_custom_video_files,
 }
 
@@ -208,7 +242,7 @@ def run_jobs(args):
         print("Processing videos: ", video_files)
         rotate = 90 if args.dataset == "assembly101" else -1
         resize_to = args.center_crop_and_resize_to
-        resize_mode = "width" if args.dataset == "epfl" else "crop"
+        resize_mode = "width" if args.dataset in ["epfl", "egoexo4d"] else "crop"
         try:
             extract_frames_to_arrow(
                 video_files, out_file, args.target_fps, resize_to, rotate, resize_mode
@@ -230,7 +264,7 @@ def run_local(args):
         print("Processing videos: ", video_files)
         rotate = 90 if args.dataset == "assembly101" else -1
         resize_to = args.center_crop_and_resize_to
-        resize_mode = "width" if args.dataset == "epfl" else "crop"
+        resize_mode = "width" if args.dataset in ["epfl", "egoexo4d"] else "crop"
         try:
             extract_frames_to_arrow(
                 video_files, out_file, args.target_fps, resize_to, rotate, resize_mode
@@ -279,6 +313,7 @@ if __name__ == "__main__":
             "wtag",
             "assembly101",
             "epfl",
+            "egoexo4d",
             "custom",
         ],
         help="The video dataset to process",
