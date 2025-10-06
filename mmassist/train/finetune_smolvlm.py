@@ -159,9 +159,9 @@ class SmolVLMDataArguments:
 class SmolVLMTrainingArguments(TrainingArguments):
     output_dir: str = field(default="/work/nvme/beto/swong2/smolvlm_proassist_finetune")
     num_train_epochs: float = field(default=3.0)
-    per_device_train_batch_size: int = field(default=4)
-    per_device_eval_batch_size: int = field(default=4)
-    gradient_accumulation_steps: int = field(default=4)
+    per_device_train_batch_size: int = field(default=8)
+    per_device_eval_batch_size: int = field(default=8)
+    gradient_accumulation_steps: int = field(default=2)
     learning_rate: float = field(default=1e-4)
     weight_decay: float = field(default=0.01)
     warmup_steps: int = field(default=100)
@@ -171,7 +171,7 @@ class SmolVLMTrainingArguments(TrainingArguments):
     save_total_limit: int = field(default=3)
     optim: str = field(default="paged_adamw_8bit")
     bf16: bool = field(default=True)
-    gradient_checkpointing: bool = field(default=True)
+    gradient_checkpointing: bool = field(default=True) # saves memory; recompute gradients during backward pass
     remove_unused_columns: bool = field(default=False)
     report_to: str = field(default="tensorboard")
 
@@ -531,6 +531,10 @@ def setup_model_and_processor(
 
 
 def main():
+    logger = logging.getLogger(__name__)
+    logger.info(f"Available GPUs: {torch.cuda.device_count()}")
+    logger.info(f"Current device: {torch.cuda.current_device()}") # make sure this lists all gpus
+
     parser = HfArgumentParser(
         (
             SmolVLMModelArguments,
@@ -602,7 +606,7 @@ def main():
     # Convert to SmolVLM format
     logger.info("Initializing SmolVLM train dataset...")
     smolvlm_train_dataset = ProAssistSmolVLMDataset(
-        # Subset(train_dataset, range(0, 10)), # temp
+        # Subset(train_dataset, range(7980, len(train_dataset))), # temp
         train_dataset,
         processor,
         use_4_1_aspect_ratio=data_args.use_4_1_aspect_ratio,
