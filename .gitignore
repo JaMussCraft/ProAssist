@@ -136,3 +136,4 @@ dmypy.json
 # project-specific
 notebooks
 slurm_logs
+smolvlm*
