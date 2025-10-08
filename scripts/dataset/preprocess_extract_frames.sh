@@ -25,6 +25,9 @@ python mmassist/datasets/preprocess/extract_frames.py --dataset assembly101 --vi
 # EPFL
 python mmassist/datasets/preprocess/extract_frames.py --dataset epfl --video_dir $RAW_DATA_DIR/epfl/videos --output_dir $PROCESSED_DATA_DIR/epfl/frames
 
+# EgoExo4D
+python mmassist/datasets/preprocess/extract_frames.py --dataset egoexo4d --video_dir $RAW_DATA_DIR/egoexo4d/takes --output_dir $PROCESSED_DATA_DIR/egoexo4d/frames
+
 # LLaVA Image Captioning
 python mmassist/datasets/preprocess/preprocess_llava_images.py --ann_file $RAW_DATA_DIR/LLaVA-Pretrain/blip_laion_cc_sbu_558k.json --image_root $RAW_DATA_DIR/LLaVA-Pretrain/images --output_dir $PROCESSED_DATA_DIR/llava
 

@@ -1,3 +1,4 @@
+import os
 from dataclasses import dataclass, asdict
 from collections import Counter
 from typing import Optional, Union, List, Dict, Tuple
@@ -113,10 +114,81 @@ Note that the minimal interval between each turn is 1 second, which means the us
 
 In this round, please **only** generate the dialog for the video from time [{start_time:.1f}s] to [{end_time:.1f}s]!"""
 
+### New prompts for frame-aware dialog generation
+
+DIALOG_GEN_PROMPT_TEMPLATE_WITH_VIDEO = """Here is a video description of an user working on the task - {goal_description}:
+{step_descriptions}
+
+A video clip showing this part of the task is also provided for your reference.
+
+Your goal is to simulate a conversation between the user and an assistant, where the user's actions are performed following the assistant's instructions. The user will first mention the overall goal of the task. The assistant informs the user about the next step at proper time. Importantly, the assistant is proactive and always provides the next step even before the user asks for it. Before the task starts, the assistant may also give a brief introduction about the task. {additional_requirement}
+
+Requirements for the assistant:
+- Time is crucial! Try to generate the dialog that strictly aligns with the video timeline.
+- Try to cover all the essential steps in the task. If the user asks a question at the time the assistant should give the next step, the assistant turn should include both the response to the question and instruction about the next step.
+- Be helpful and friendly. If the user asks something that has been explained before, the assistant should still provide the information with patience.
+- Try to be encouraging when the user makes progress, but do not overdo it.
+- Be concise! The dialog is verbal, so avoid long sentences.
+- Do not say "can you do it for me" to the user.
+
+
+Requirements for the user:
+{user_requirement}
+
+
+Generation format:
+[time] User: ...
+[time] Assistant: ...
+[time] Assistant: ...
+[time] User: ...
+[time] Assistant: ...
+
+Note that the minimal interval between each turn is 1 second, which means the user will wait for at least 1 second after an assistant's turn, and two consecutive assistant's turns should have at least 1 second interval. Combine close turns into a single turn if necessary. One exception is that the assistant must respond **immediately** when the user says something (i.e. give a response right after an user's turn at the same time).
+
+{dialog_history}
+
+In this round, please **only** generate the dialog for the video from time [{start_time:.1f}s] to [{end_time:.1f}s]!"""
+
+DIALOG_GEN_PROMPT_TEMPLATE_WITH_FRAMES = """Here is a video description of an user working on the task - {goal_description}:
+{step_descriptions}
+
+Key frames from the video are provided alongside the descriptions to give you visual context.
+
+Your goal is to simulate a conversation between the user and an assistant, where the user's actions are performed following the assistant's instructions. The user will first mention the overall goal of the task. The assistant informs the user about the next step at proper time. Importantly, the assistant is proactive and always provides the next step even before the user asks for it. Before the task starts, the assistant may also give a brief introduction about the task. {additional_requirement}
+
+Requirements for the assistant:
+- Time is crucial! Try to generate the dialog that strictly aligns with the video timeline.
+- Try to cover all the essential steps in the task. If the user asks a question at the time the assistant should give the next step, the assistant turn should include both the response to the question and instruction about the next step.
+- Be helpful and friendly. If the user asks something that has been explained before, the assistant should still provide the information with patience.
+- Try to be encouraging when the user makes progress, but do not overdo it.
+- Be concise! The dialog is verbal, so avoid long sentences.
+- Do not say "can you do it for me" to the user.
+
+
+Requirements for the user:
+{user_requirement}
+
+
+Generation format:
+[time] User: ...
+[time] Assistant: ...
+[time] Assistant: ...
+[time] User: ...
+[time] Assistant: ...
+
+Note that the minimal interval between each turn is 1 second, which means the user will wait for at least 1 second after an assistant's turn, and two consecutive assistant's turns should have at least 1 second interval. Combine close turns into a single turn if necessary. One exception is that the assistant must respond **immediately** when the user says something (i.e. give a response right after an user's turn at the same time).
+
+{dialog_history}
+
+In this round, please **only** generate the dialog for the video from time [{start_time:.1f}s] to [{end_time:.1f}s]!"""
+
+FRAME_DESCRIPTION_PROMPT = """Describe what you see in this image in one concise sentence (around 15-20 words). Focus on the key objects, actions, and environment relevant to the task being performed. Be specific and factual."""
+
 ADDITIONAL_REQUIREMENTS = {
     # "holoassist": "Note that the video description contains both the user's actions and the user-assistant dialog. Anchor the dialog to the **key steps** of the task, not every single action of the user. Errors made by the user and the timing of original dialog can be a strong hint for when to simulate the dialog. You may rephrase the dialog to make it more coherent and human-like.", 
     "holoassist": "Note that the video description contains both the user's actions and the user-assistant dialog. Anchor the simulated dialog to the existing dialog, and try to rephrase the utterances to make them more coherent and human-like. You may add a few more turns around the **essential steps** of the task, which are the underlying intentions of the action instead of the actions themselves. Add a few turns to make the dialog more fluent and helpful, but avoid being overwhelming.",
     "egoexolearn": "The simulated dialog should be centered around the **key steps** of the task, not every single action of the user. Try to make the dialog more coherent and helpful as what a human assistant will say.",
+    "egoexo4d": "Note that in the video description, letters (such as 'C', 'O', 'X') are used to identify different people in the annotations. The user is the person performing the task. The simulated dialog should be centered around the **key steps** of the task, not every single action of the user. Try to make the dialog more coherent and helpful as what a human assistant will say.",
     "epfl": "The simulated dialog should be centered around the **key steps** of the task, not every single action of the user. Try to make the dialog more coherent and helpful as what a human assistant will say.",
     "epickitchens": "The simulated dialog should be centered around the **key steps** of the task, not every single action of the user. Note that the user may make mistake or perform suboptimal actions, the assistant should not give instructions on those actions, but smartly select right time to give guidance. Try to make the dialog more coherent and helpful as what a human assistant will say.",
     "wtag": "Note that the video description contains both the step description and the user-assistant dialog. Anchor the simulated dialog to the existing dialog, and try to rephrase the utterances to make them more coherent and human-like. Add more details such as assistant feedback or user question during long steps if necessary. Remember to generate the response to user's question even if there isn't one in the original dialog from the video description.", 
@@ -432,6 +504,160 @@ def generate_conversation(
 
 
 @retry_on_failure()
+def generate_conversation_with_frames(
+    goal_description: str,
+    clips: list[tuple[float, float, str]],
+    llm: LLMGenerator,
+    user_types: list[str],
+    additional_requirement: str = "",
+    frames_dir: Optional[str] = None,
+    video_uid: str = "",
+    use_frames: str = "frames",  # "video" or "frames"
+    frames_fps: float = 2.0,
+) -> list[str]:
+    """Generate conversations with visual context (video or frames).
+    
+    This function is similar to generate_conversation but supports multimodal input.
+    For Option 1 (use_frames="video"): Creates video clips from frames for each clip.
+    For Option 2 (use_frames="frames"): Includes individual frames for annotations in each clip.
+    
+    Note: Frame descriptions (Option 3) are handled in parse_egoexo4d_annotations,
+    so this function uses the regular text-based generation.
+    """
+    import re
+    from mmassist.datasets.generate.frame_utils import (
+        load_frames_from_arrow,
+        get_frame_at_timestamp,
+        image_to_base64_data_url,
+    )
+    
+    # Load frames if needed
+    frames_data = None
+    if frames_dir is not None and (use_frames in ["video", "frames"]):
+        arrow_file = os.path.join(frames_dir, f"{video_uid}.arrow")
+        if os.path.exists(arrow_file):
+            try:
+                frames_data = load_frames_from_arrow(arrow_file)
+                print(f"      Loaded {len(frames_data)} frames for multimodal generation")
+            except Exception as e:
+                print(f"      Warning: Failed to load frames: {e}")
+                # Fall back to text-only generation
+                use_frames = "none"
+        else:
+            print(f"      Warning: Frame file not found: {arrow_file}")
+            use_frames = "none"
+    
+    user_reqs = [DIALOG_GEN_USER_REQUIREMENTS[p] for p in user_types]
+
+    batch_conv = [[] for _ in range(len(user_reqs))]
+    for clip_idx, (st, et, desc) in enumerate(clips):
+        print(f"      📹 Clip {clip_idx+1}/{len(clips)}: {st:.1f}s-{et:.1f}s ({et-st:.1f}s duration)")
+        print(f"         Description preview: {desc[:150]}...")
+        
+        # Extract timestamps from description for frame selection (Option 2)
+        clip_timestamps = []
+        if use_frames == "frames" and frames_data is not None:
+            # Parse timestamps from description lines like "[14.2s] ..."
+            timestamp_pattern = r'\[(\d+\.?\d*)s\]'
+            matches = re.findall(timestamp_pattern, desc)
+            clip_timestamps = [float(t) for t in matches]
+            print(f"         Found {len(clip_timestamps)} timestamps for frame selection")
+        
+        batch_inputs = []
+        for i, user_req in enumerate(user_reqs):
+            dialog_history = conversation_dict_to_text(
+                batch_conv[i], add_labels=True, max_turns_to_keep=20
+            )
+            if dialog_history:
+                dialog_history = f"You have already generated the following dialog:\n{dialog_history}"
+                print(f"         Using conversation history for user type {user_types[i]} ({len(batch_conv[i])} previous turns)")
+            else:
+                print(f"         Starting fresh conversation for user type {user_types[i]}")
+            
+            # Choose the appropriate prompt template based on mode
+            if use_frames == "video":
+                prompt_template = DIALOG_GEN_PROMPT_TEMPLATE_WITH_VIDEO
+            elif use_frames == "frames":
+                prompt_template = DIALOG_GEN_PROMPT_TEMPLATE_WITH_FRAMES
+            else:
+                prompt_template = DIALOG_GEN_PROMPT_TEMPLATE
+                
+            prompt_text = prompt_template.format(
+                goal_description=goal_description,
+                step_descriptions=desc,
+                user_requirement=user_req,
+                dialog_history=dialog_history,
+                start_time=st,
+                end_time=et,
+                additional_requirement=additional_requirement,
+            )
+            
+            # For Option 2 (frames): Create multimodal content with images
+            if use_frames == "frames" and frames_data is not None and clip_timestamps:
+                # Create multimodal content with text + frames
+                content_parts = [{"type": "text", "text": prompt_text}]
+                
+                # Add frames for each timestamp
+                frames_added = 0
+                for timestamp in clip_timestamps:
+                    try:
+                        frame = get_frame_at_timestamp(frames_data, timestamp, frames_fps)
+                        if frame is not None:
+                            # Convert frame to base64 data URL
+                            frame_data_url = image_to_base64_data_url(frame, format="JPEG")
+                            content_parts.append({
+                                "type": "image_url",
+                                "image_url": {"url": frame_data_url}
+                            })
+                            frames_added += 1
+                    except Exception as e:
+                        print(f"         Warning: Failed to get frame at {timestamp}s: {e}")
+                
+                if frames_added > 0:
+                    print(f"         Added {frames_added} frames to multimodal prompt")
+                    batch_inputs.append([("system", DIALOG_GEN_SYS_PROMPT), ("user", content_parts)])
+                else:
+                    # Fall back to text-only if no frames could be added
+                    print(f"         Warning: No frames added, falling back to text-only")
+                    batch_inputs.append([("system", DIALOG_GEN_SYS_PROMPT), ("user", prompt_text)])
+            else:
+                # Text-only generation for other modes or when frames unavailable
+                batch_inputs.append([("system", DIALOG_GEN_SYS_PROMPT), ("user", prompt_text)])
+            
+            # TODO for Option 1 (video mode):
+            # 1. Extract frames for this clip: get_frames_for_clip(frames_data, st, et, frames_fps)
+            # 2. Convert to video: frames_to_video_bytes(clip_frames, frames_fps)
+            # 3. Upload video and get URL (OpenRouter doesn't support inline video yet)
+
+        # parallel generate for all user profiles
+        print(f"         🤖 Generating dialogs for {len(user_types)} user types...")
+        outputs = llm.batch_generate(batch_inputs)
+
+        # add the generated dialog to the conversation history
+        clip_convs = []
+        for output in outputs:
+            conv_dict = parse_text_to_conversation_dict(output[0])
+            conv_dict = [c for c in conv_dict if c["time"] <= et]
+            clip_convs.append(conv_dict)
+
+        print(f"         🔧 Refining and labeling generated dialogs...")
+        clip_convs_refined = refine_and_label_dialog(clip_convs, llm)
+        
+        for idx, conv in enumerate(clip_convs_refined):
+            batch_conv[idx].extend(conv)
+            print(f"         Added {len(conv)} turns to conversation {idx+1} ({user_types[idx]})")
+
+    print(f"   📊 Final conversation statistics:")
+    for i, conv in enumerate(batch_conv):
+        print(f"      Conversation {i+1} ({user_types[i]}): {len(conv)} total turns")
+
+    conv_with_user_type = [
+        {"conversation": c, "user_type": p} for c, p in zip(batch_conv, user_types)
+    ]
+    return conv_with_user_type
+
+
+@retry_on_failure()
 def refine_and_label_dialog(conversations: list[list[dict]], llm: LLMGenerator) -> dict:
     batch_inputs = []
     for conv in conversations:
@@ -530,6 +756,9 @@ def generate_from_annotation(
     keep_original_anns: bool = True,
     min_ann_ratio: float = 0.5,
     filter_by_llm: bool = False,
+    frames_dir: Optional[str] = None,
+    use_frames: str = "none",
+    frames_fps: float = 2.0,
 ) -> Union[GeneratedOutputs, str]:
 
     video_uid = annotation.video_uid
@@ -618,6 +847,7 @@ def generate_from_annotation(
     print(f"\n💬 STEP 3: Conversation Generation")
     print(f"   User types: {user_types}")
     print(f"   Number of clips to process: {len(annotation.clips)}")
+    print(f"   Frame mode: {use_frames}")
     
     clips = annotation.clips
     add_reqs = ADDITIONAL_REQUIREMENTS.get(annotation.dataset, "")
@@ -630,9 +860,23 @@ def generate_from_annotation(
         print(f"   No additional dataset-specific requirements")
         
     print(f"   🔄 Starting clip-by-clip dialog generation...")
-    conversations = generate_conversation(
-        goal_description, clips, llm, user_types, add_reqs
-    )
+    
+    # Choose generation function based on frame mode
+    # Note: Option 3 (descriptions) uses regular generate_conversation since
+    # descriptions are already embedded in the text
+    if use_frames in ["video", "frames"]:
+        conversations = generate_conversation_with_frames(
+            goal_description, clips, llm, user_types, add_reqs,
+            frames_dir=frames_dir,
+            video_uid=video_uid,
+            use_frames=use_frames,
+            frames_fps=frames_fps,
+        )
+    else:
+        conversations = generate_conversation(
+            goal_description, clips, llm, user_types, add_reqs
+        )
+    
     print(f"✅ Generated {len(conversations)} conversations")
     
     # adjust time

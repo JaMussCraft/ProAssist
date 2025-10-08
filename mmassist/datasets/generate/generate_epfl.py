@@ -23,9 +23,9 @@ class EpflPreprocessArgs:
     user_types: str = "no_talk@2,talk_some@4,talk_more@4"
     num_repeats: int = 10
     force_rerun: bool = False
-    min_ann_ratio: float = 0.3  # Lower threshold for EPFL since it has sparser annotations
+    min_ann_ratio: float = 0.5
     filter_by_llm: bool = True
-    max_num_lines_per_gen: int = 20  # As specified in requirements
+    max_num_lines_per_gen: int = 20
 
 
 def load_epfl_annotations(annotation_dir: str) -> Tuple[List[Dict], List[Dict]]:
@@ -231,29 +231,6 @@ def parse_epfl_annotations(
     except Exception as e:
         print(f"Error parsing annotations for {participant}/{session}: {e}")
         return None
-
-
-def parse_epfl_annotation_wrapper(
-    ann: dict, max_num_lines_per_gen: int = 20
-) -> Optional[ParsedVideoAnns]:
-    """
-    Wrapper function to match the expected signature for run_jobs.
-    
-    Args:
-        ann: Dictionary containing participant, session, and annotation directory info
-        max_num_lines_per_gen: Maximum number of lines per generation clip
-        
-    Returns:
-        ParsedVideoAnns object or None if parsing fails
-    """
-    split = ann["split"]
-    participant = ann["participant"]
-    session = ann["session"]
-    annotation_dir = ann["annotation_dir"]
-    
-    return parse_epfl_annotations(
-        split, participant, session, annotation_dir, max_num_lines_per_gen
-    )
 
 
 def load_epfl_dataset(args: EpflPreprocessArgs) -> Dict[str, List[ParsedVideoAnns]]:
@@ -501,7 +478,14 @@ if __name__ == "__main__":
     print("Starting local processing...")
     start_time = time.time()
     
-    split_outputs = run_local_jobs(args, anns_per_split_dicts, parse_epfl_annotation_wrapper)
+    split_outputs = run_local_jobs(
+        args, 
+        anns_per_split_dicts, 
+        lambda ann, max_num_lines: parse_epfl_annotations(
+            ann["split"], ann["participant"], ann["session"], 
+            ann["annotation_dir"], max_num_lines
+        )
+    )
     
     # Save results with auto-evaluation
     os.makedirs(args.output_dir, exist_ok=True)

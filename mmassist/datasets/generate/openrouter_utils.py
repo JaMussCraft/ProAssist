@@ -1,7 +1,7 @@
 import os
 import requests
 import json
-from typing import List, Tuple, Dict, Any
+from typing import List, Tuple, Dict, Any, Union
 import time
 from dataclasses import dataclass
 
@@ -39,8 +39,13 @@ class OpenRouterGenerator:
         )
         return cls(config)
     
-    def _make_request(self, messages: List[Dict[str, str]], **kwargs) -> str:
-        """Make a single request to OpenRouter API"""
+    def _make_request(self, messages: List[Dict[str, Any]], **kwargs) -> str:
+        """Make a single request to OpenRouter API
+        
+        Args:
+            messages: List of message dicts with 'role' and 'content' fields.
+                     Content can be string or list of content parts (for multimodal)
+        """
         data = {
             "model": self.config.model,
             "messages": messages,
@@ -54,7 +59,7 @@ class OpenRouterGenerator:
                 f"{self.config.base_url}/chat/completions",
                 headers=self.headers,
                 json=data,
-                timeout=60
+                timeout=120  # Increased timeout for image processing
             )
             response.raise_for_status()
             
@@ -63,18 +68,27 @@ class OpenRouterGenerator:
             
         except requests.exceptions.RequestException as e:
             print(f"Request failed: {e}")
+            if hasattr(e, 'response') and e.response is not None:
+                print(f"Response: {e.response.text}")
             raise
         except KeyError as e:
             print(f"Unexpected response format: {e}")
             print(f"Response: {response.text}")
             raise
     
-    def generate(self, inputs: List[Tuple[str, str]], **kwargs) -> List[str]:
+    def generate(self, inputs: List[Tuple[str, Union[str, List[Dict]]]], **kwargs) -> List[str]:
         """
         Generate responses for a single conversation.
         
         Args:
-            inputs: List of (role, content) tuples for the conversation
+            inputs: List of (role, content) tuples for the conversation.
+                   Content can be:
+                   - str: Plain text message
+                   - List[Dict]: Multimodal content (text + images)
+                     Example: [
+                         {"type": "text", "text": "Describe this image"},
+                         {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64,..."}}
+                     ]
             **kwargs: Additional parameters for the API call
             
         Returns:
@@ -99,12 +113,13 @@ class OpenRouterGenerator:
         
         raise Exception(f"Failed after {max_retries} retries")
     
-    def batch_generate(self, inputs: List[List[Tuple[str, str]]], **kwargs) -> List[List[str]]:
+    def batch_generate(self, inputs: List[List[Tuple[str, Union[str, List[Dict]]]]], **kwargs) -> List[List[str]]:
         """
         Generate responses for multiple conversations.
         
         Args:
-            inputs: List of conversations, each conversation is a list of (role, content) tuples
+            inputs: List of conversations, each conversation is a list of (role, content) tuples.
+                   Content can be string or list of content parts (for multimodal)
             **kwargs: Additional parameters for the API call
             
         Returns:
@@ -141,8 +156,11 @@ class LLMGenerator:
         openrouter_gen = OpenRouterGenerator.build(model_id=model_id)
         return cls(openrouter_gen)
     
-    def generate(self, inputs: List[Tuple[str, str]], **kwargs) -> List[str]:
-        """Generate responses maintaining compatibility with existing interface"""
+    def generate(self, inputs: List[Tuple[str, Union[str, List[Dict]]]], **kwargs) -> List[str]:
+        """Generate responses maintaining compatibility with existing interface
+        
+        Supports both text-only and multimodal inputs.
+        """
         # Filter out vLLM-specific parameters
         filtered_kwargs = {}
         if "temperature" in kwargs:
@@ -154,8 +172,11 @@ class LLMGenerator:
         
         return self.openrouter_generator.generate(inputs, **filtered_kwargs)
     
-    def batch_generate(self, inputs: List[List[Tuple[str, str]]], **kwargs) -> List[List[str]]:
-        """Batch generate responses maintaining compatibility with existing interface"""
+    def batch_generate(self, inputs: List[List[Tuple[str, Union[str, List[Dict]]]]], **kwargs) -> List[List[str]]:
+        """Batch generate responses maintaining compatibility with existing interface
+        
+        Supports both text-only and multimodal inputs.
+        """
         # Filter out vLLM-specific parameters
         filtered_kwargs = {}
         if "temperature" in kwargs:
