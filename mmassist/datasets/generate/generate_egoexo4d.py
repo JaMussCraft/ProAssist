@@ -36,6 +36,8 @@ class EgoExo4DPreprocessArgs:
     frames_fps: float = 2.0  # FPS of the extracted frames in Arrow files
     video_llm: str = "google/gemini-2.5-pro"  # LLM for video-based generation (Option 1)
     frame_desc_llm: str = "google/gemini-2.5-flash"  # LLM for frame descriptions (Option 3)
+    # Keystep-aware progress summary option
+    use_keysteps: bool = False  # Use keystep annotations for progress summaries
 
 
 def load_atomic_descriptions(data_dir: str, split: str) -> Dict:
@@ -49,7 +51,7 @@ def load_atomic_descriptions(data_dir: str, split: str) -> Dict:
     Returns:
         Dictionary with atomic description data
     """
-    atomic_file = os.path.join(data_dir, f"atomic_descriptions_{split}_filtered_longest.json")
+    atomic_file = os.path.join(data_dir, f"atomic_descriptions_{split}_filtered_longest_keysteps.json") # temp with keystep
     with open(atomic_file, 'r') as f:
         return json.load(f)
 
@@ -78,7 +80,7 @@ def load_take_uid_to_task_name_mapping(data_dir: str) -> Dict[str, str]:
         data_dir: Path to the datasets/egoexo4d directory
         
     Returns:
-        Dictionary mapping take_uid to take_name
+        Dictionary mapping take_uid to task_name
     """
     # Adjust path to go up from annotations to the parent directory
     takes_file = os.path.join(os.path.dirname(data_dir), "takes.json")
@@ -86,7 +88,7 @@ def load_take_uid_to_task_name_mapping(data_dir: str) -> Dict[str, str]:
     with open(takes_file, 'r') as f:
         takes_data = json.load(f)
     
-    # Create mapping from take_uid to take_name
+    # Create mapping from take_uid to task_name
     take_uid_to_name = {}
     for take in takes_data:
         take_uid = take.get('take_uid')
@@ -97,12 +99,68 @@ def load_take_uid_to_task_name_mapping(data_dir: str) -> Dict[str, str]:
     return take_uid_to_name
 
 
+def load_take_uid_to_take_name_mapping(data_dir: str) -> Dict[str, str]:
+    """
+    Load takes.json and create a mapping from take_uid to take_name.
+    
+    Args:
+        data_dir: Path to the datasets/egoexo4d/annotations directory
+        
+    Returns:
+        Dictionary mapping take_uid to take_name
+    """
+    # Adjust path to go up from annotations to the parent directory
+    takes_file = os.path.join(os.path.dirname(data_dir), "takes.json")
+    
+    with open(takes_file, 'r') as f:
+        takes_data = json.load(f)
+    
+    # Create mapping from take_uid to take_name
+    take_uid_to_take_name = {}
+    for take in takes_data:
+        take_uid = take.get('take_uid')
+        take_name = take.get('take_name')
+        if take_uid and take_name:
+            take_uid_to_take_name[take_uid] = take_name
+    
+    return take_uid_to_take_name
+
+
+def find_aria_arrow_file(frames_dir: str, take_name: str) -> Optional[str]:
+    """
+    Find the Arrow file for a given take_name that contains "aria" in the camera name.
+    
+    The filename format is: {take_name}_downscaled_{camera_name}.arrow
+    Example: fair_cooking_05_2_downscaled_aria02_214-1.arrow
+    
+    Args:
+        frames_dir: Directory containing frame Arrow files
+        take_name: The take name
+        
+    Returns:
+        Full path to the Arrow file if found, None otherwise
+    """
+    if not os.path.exists(frames_dir):
+        return None
+    
+    # Pattern to match: {take_name}_downscaled_*aria*.arrow
+    prefix = f"{take_name}_downscaled_"
+    
+    # List all files in the frames directory
+    for filename in os.listdir(frames_dir):
+        if filename.startswith(prefix) and "aria" in filename and filename.endswith(".arrow"):
+            return os.path.join(frames_dir, filename)
+    
+    return None
+
+
 def parse_egoexo4d_annotations(
     split: str,
     take_uid: str,
     atomic_data: Dict,
     keystep_data: Dict,
-    take_uid_to_task_name, 
+    take_uid_to_task_name: Dict[str, str],
+    take_uid_to_take_name: Dict[str, str],
     max_num_lines_per_gen: int = 50,
     frames_dir: Optional[str] = None,
     use_frames: str = "none",
@@ -117,6 +175,8 @@ def parse_egoexo4d_annotations(
         take_uid: Take UID
         atomic_data: Atomic description data
         keystep_data: Keystep annotation data
+        take_uid_to_task_name: Mapping from take_uid to task_name
+        take_uid_to_take_name: Mapping from take_uid to take_name (for finding frame files)
         max_num_lines_per_gen: Maximum number of lines per generation clip
         frames_dir: Directory containing frame Arrow files (for frame incorporation)
         use_frames: Frame incorporation mode ("none", "video", "frames", "descriptions")
@@ -148,16 +208,22 @@ def parse_egoexo4d_annotations(
         # Load frames if needed for description generation (Option 3)
         frames_data = None
         if use_frames == "descriptions" and frames_dir is not None:
-            arrow_file = os.path.join(frames_dir, f"{take_uid}.arrow")
-            if os.path.exists(arrow_file):
-                try:
-                    frames_data = load_frames_from_arrow(arrow_file)
-                    print(f"         Loaded {len(frames_data)} frames from {arrow_file}")
-                except Exception as e:
-                    print(f"         Warning: Failed to load frames from {arrow_file}: {e}")
-                    frames_data = None
+            # Get the take_name from the mapping
+            take_name = take_uid_to_take_name.get(take_uid)
+            if take_name:
+                # Find the Arrow file with "aria" in the camera name
+                arrow_file = find_aria_arrow_file(frames_dir, take_name)
+                if arrow_file and os.path.exists(arrow_file):
+                    try:
+                        frames_data = load_frames_from_arrow(arrow_file)
+                        print(f"         Loaded {len(frames_data)} frames from {arrow_file}")
+                    except Exception as e:
+                        print(f"         Warning: Failed to load frames from {arrow_file}: {e}")
+                        frames_data = None
+                else:
+                    print(f"         Warning: Frame file not found for take_name '{take_name}' with aria camera")
             else:
-                print(f"         Warning: Frame file not found: {arrow_file}")
+                print(f"         Warning: No take_name found for take_uid '{take_uid}'")
         
         # Create step descriptions from atomic annotations
         all_descriptions = []
@@ -173,6 +239,7 @@ def parse_egoexo4d_annotations(
                     if frame is not None:
                         frame_desc = describe_frame_with_llm(frame, frame_desc_llm, FRAME_DESCRIPTION_PROMPT)
                         frame_desc = f" (image shows: {frame_desc})"
+                        print(frame_desc)
                 except Exception as e:
                     print(f"         Warning: Failed to describe frame at {timestamp}s: {e}")
             
@@ -238,6 +305,9 @@ def parse_egoexo4d_annotations(
         if keystep_anns:
             original_ann["keystep_annotations"] = keystep_anns
         
+        # Get take_name for this take_uid (for finding Arrow frame files)
+        take_name = take_uid_to_take_name.get(take_uid)
+        
         parsed_ann = ParsedVideoAnns(
             dataset="egoexo4d",
             domain="cooking",
@@ -250,6 +320,7 @@ def parse_egoexo4d_annotations(
             ann_ratio=ann_ratio,
             num_steps=len(atomic_annotations),
             num_substeps=0,
+            take_name=take_name,  # For finding Arrow files with pattern {take_name}_downscaled_*aria*.arrow
             original_ann=original_ann
         )
         
@@ -291,19 +362,23 @@ def load_egoexo4d_dataset(args: EgoExo4DPreprocessArgs) -> Dict[str, List[Parsed
             print(f"Annotation files not found for split {split}: {e}")
             continue
 
+        # Load both task_name and take_name mappings
         take_uid_to_task_name = load_take_uid_to_task_name_mapping(args.data_dir)
+        take_uid_to_take_name = load_take_uid_to_take_name_mapping(args.data_dir)
         
         split_annotations = []
         
         # Get all take_uids from atomic annotations
         take_uids = list(atomic_data.get('annotations', {}).keys())
+        take_uids = take_uids[:1] # temp
         print(f"Found {len(take_uids)} take_uids in atomic annotations")
         
         # Parse each take_uid
         for take_uid in tqdm(take_uids, desc=f"Parsing {split}"):
             # Parse annotations
             parsed_ann = parse_egoexo4d_annotations(
-                split, take_uid, atomic_data, keystep_data, take_uid_to_task_name,
+                split, take_uid, atomic_data, keystep_data, 
+                take_uid_to_task_name, take_uid_to_take_name,
                 args.max_num_lines_per_gen,
                 frames_dir=args.frames_dir if args.use_frames != "none" else None,
                 use_frames=args.use_frames,
@@ -396,6 +471,7 @@ def run_local_jobs(
                         "sampling_params": llm.default_sampling_args,
                         "use_frames": args.use_frames,
                         "frames_fps": args.frames_fps,
+                        "use_keysteps": args.use_keysteps,
                     }
                 
                 # generate the outputs (parsed_ann is already a ParsedVideoAnns object)
@@ -409,6 +485,7 @@ def run_local_jobs(
                     frames_dir=args.frames_dir if args.use_frames != "none" else None,
                     use_frames=args.use_frames,
                     frames_fps=args.frames_fps,
+                    use_keysteps=args.use_keysteps,
                 )
                 
                 # save the output
@@ -486,14 +563,12 @@ if __name__ == "__main__":
             print(f"  Video LLM: {args.video_llm}")
         elif args.use_frames == "descriptions":
             print(f"  Frame description LLM: {args.frame_desc_llm}")
+    print(f"Progress summary mode: {'Keystep-aware' if args.use_keysteps else 'Standard'}")
     print("=" * 50)
     
     # Load annotations
     print("Loading EgoExo4D annotations...")
     anns_per_split = load_egoexo4d_dataset(args)
-
-    anns_per_split["train"] = anns_per_split["train"][:1] # temp
-    anns_per_split["val"] = anns_per_split["val"][:1] # temp
     
     if not any(anns_per_split.values()):
         print("No annotations found! Please check your data directory.")

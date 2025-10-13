@@ -79,8 +79,29 @@ DIALOG_GEN_SYS_PROMPT = "You are an expert of imagining conversations between us
 
 DIALOG_GEN_USER_REQUIREMENTS = {
     "no_talk": "- The user follows the assistant's instructions and does not talk.",
-    "talk_some": "- The user asks a few questions or confirm about the instructions, accounting for about 20% of the steps.\n",
-    "talk_more": "- The user is talkative and may ask questions that can either be related to the task or not, accounting for about 40% of the steps.\n"
+    "talk_some": (
+        "- The user is moderately engaged and speaks up regularly throughout the task.\n"
+        "- Aim for approximately 30-40% of all conversational turns to be from the user (if there are 10 total turns, 3-4 should be user turns).\n"
+        "- User behaviors include:\n"
+        "  * Asking clarifying questions about instructions (e.g., 'How long should I cook this?', 'Which bowl should I use?')\n"
+        "  * Confirming understanding before proceeding (e.g., 'So I mix these together first?', 'Should I turn up the heat?')\n"
+        "  * Reporting completion of steps (e.g., 'Done chopping', 'The water is boiling now')\n"
+        "  * Asking about next steps occasionally (e.g., 'What's next?', 'Is this ready?')\n"
+        "  * Expressing uncertainty or hesitation (e.g., 'I'm not sure if this is right', 'Does this look okay?')\n"
+    ),
+    "talk_more": (
+        "- The user is highly engaged, talkative, and interactive throughout the entire task.\n"
+        "- Aim for approximately 50-60% of all conversational turns to be from the user (if there are 10 total turns, 5-6 should be user turns).\n"
+        "- User behaviors include:\n"
+        "  * Frequently asking clarifying questions (e.g., 'Should the heat be medium or high?', 'How finely should I chop this?')\n"
+        "  * Regularly confirming understanding (e.g., 'Just to confirm, I stir clockwise?', 'You mean the red pepper, right?')\n"
+        "  * Providing frequent status updates (e.g., 'I'm mixing now', 'Almost done with this step', 'This is taking longer than expected')\n"
+        "  * Asking follow-up questions (e.g., 'Why do we do it this way?', 'Can I use a different ingredient?')\n"
+        "  * Expressing observations and concerns (e.g., 'This seems thick', 'I smell something burning', 'The color looks different')\n"
+        "  * Making small talk related OR unrelated to the task (e.g., 'I've never made this before', 'My friend loves this dish', 'It's hot in here')\n"
+        "  * Asking proactive questions about future steps (e.g., 'What comes after this?', 'Do I need to prepare anything else?')\n"
+        "  * Expressing emotions and reactions (e.g., 'This is harder than I thought', 'Wow, that smells great!', 'Oops!')\n"
+    )
 }
 
 DIALOG_GEN_PROMPT_TEMPLATE = """Here is a video description of an user working on the task - {goal_description}:
@@ -182,13 +203,13 @@ Note that the minimal interval between each turn is 1 second, which means the us
 
 In this round, please **only** generate the dialog for the video from time [{start_time:.1f}s] to [{end_time:.1f}s]!"""
 
-FRAME_DESCRIPTION_PROMPT = """Describe what you see in this image in one concise sentence (around 15-20 words). Focus on the key objects, actions, and environment relevant to the task being performed. Be specific and factual."""
+FRAME_DESCRIPTION_PROMPT = """You are viewing an egocentric (first-person) video frame of someone cooking in a kitchen. Describe the most important visual information that would help a kitchen assistant provide better guidance. In 2-3 concise sentences (30-50 words), focus on: (1) Key ingredients, tools, or cooking vessels visible and their state (e.g., 'pan is heating', 'knife is on the cutting board', 'onions are translucent') and (2) Any visual cues about cooking progress or technique (e.g., 'oil shimmering', 'vegetables browning', 'steam rising'). Focus on providing visual context, don't infer what they imply."""
 
 ADDITIONAL_REQUIREMENTS = {
     # "holoassist": "Note that the video description contains both the user's actions and the user-assistant dialog. Anchor the dialog to the **key steps** of the task, not every single action of the user. Errors made by the user and the timing of original dialog can be a strong hint for when to simulate the dialog. You may rephrase the dialog to make it more coherent and human-like.", 
     "holoassist": "Note that the video description contains both the user's actions and the user-assistant dialog. Anchor the simulated dialog to the existing dialog, and try to rephrase the utterances to make them more coherent and human-like. You may add a few more turns around the **essential steps** of the task, which are the underlying intentions of the action instead of the actions themselves. Add a few turns to make the dialog more fluent and helpful, but avoid being overwhelming.",
     "egoexolearn": "The simulated dialog should be centered around the **key steps** of the task, not every single action of the user. Try to make the dialog more coherent and helpful as what a human assistant will say.",
-    "egoexo4d": "Note that in the video description, letters (such as 'C', 'O', 'X') are used to identify different people in the annotations. The user is the person performing the task. The simulated dialog should be centered around the **key steps** of the task, not every single action of the user. Try to make the dialog more coherent and helpful as what a human assistant will say.",
+    "egoexo4d": "Note that in the video description, letters (such as 'C', 'O', 'X') are used to identify different people in the annotations. The user is the person performing the task. The simulated dialog should be centered around the **key steps** of the task, not every single action of the user. Try to make the dialog more coherent and helpful as what a human assistant will say. Do NOT give overly granular instructions such as specifying which hand the user should use for an action or transferring certain tool to a hand - the user can decide this with common sense.",
     "epfl": "The simulated dialog should be centered around the **key steps** of the task, not every single action of the user. Try to make the dialog more coherent and helpful as what a human assistant will say.",
     "epickitchens": "The simulated dialog should be centered around the **key steps** of the task, not every single action of the user. Note that the user may make mistake or perform suboptimal actions, the assistant should not give instructions on those actions, but smartly select right time to give guidance. Try to make the dialog more coherent and helpful as what a human assistant will say.",
     "wtag": "Note that the video description contains both the step description and the user-assistant dialog. Anchor the simulated dialog to the existing dialog, and try to rephrase the utterances to make them more coherent and human-like. Add more details such as assistant feedback or user question during long steps if necessary. Remember to generate the response to user's question even if there isn't one in the original dialog from the video description.", 
@@ -234,18 +255,101 @@ Do not just copy paste the original dialog!"""
 
 SUMMARY_SYS_PROMPT = "You are an expert of summarizing conversations."
 
-PROGRESS_SUMMARY_PROMPT_TEMPLATE = """Here is a conversation between a user and an assistant:
+PROGRESS_SUMMARY_PROMPT_TEMPLATE = """Here is a conversation between a user and an assistant working on a cooking task:
 {dialog_history}
 
-Summarize the task goal and progress so far, including:
-1. The task goal mentioned by the user.
-2. What has been done.
-3. Other topics mentioned by the user in the conversation, if any.
-4. The current state/step of the task.
-Be faithful and try to include all the relevant information.
+Your task is to generate a concise progress summary that the assistant can use to maintain context. Focus on ESSENTIAL information that affects future steps.
 
-Give your response in plain text of a single line in the following format:
-SUMMARY: <progress summary>
+INCLUDE:
+- Current state of ingredients (e.g., "onions translucent", "chicken browned")
+- What's in pans/bowls/oven and their current status
+- Equipment currently in use
+- Active timers and their purposes
+- Important techniques used that might be referenced later
+- Things that need attention soon
+- User context: skill level demonstrated, dietary substitutions made
+- Critical warnings or reminders (must-do timing, safety concerns)
+- Visual states verifiable in recent frames (e.g., "vegetables showing light char on edges")
+
+EXCLUDE:
+- Granular atomic actions unless they're critical
+- Overly detailed play-by-play of past actions
+- Redundant information
+- General chitchat unrelated to cooking
+- Exact verbatim exchanges (paraphrase instead)
+- Steps that are truly "done and dusted" with no future relevance
+
+FORMATTING:
+- Most recent steps get more detail
+- Earlier steps get compressed unless they have future relevance
+- Be concise but complete
+- Use a structured format similar to:
+
+DISH: [dish name]
+PROGRESS: Step X/Y - [step in recipe]
+CURRENT STATE: [what's happening now, what's in active use]
+COMPLETED: [high-level summary of what's been done, emphasizing items with future impact]
+NEXT: [what needs to happen next]
+TIMERS: [any active timers or "None active"]
+NOTES: [user preferences, skill observations, warnings]
+VISUAL: [observable states from recent actions]
+
+Give your response in the following format:
+SUMMARY: <structured progress summary following the format above>
+"""
+
+PROGRESS_SUMMARY_WITH_KEYSTEPS_PROMPT_TEMPLATE = """Here is a conversation between a user and an assistant working on a cooking task:
+{dialog_history}
+
+Recipe:
+{recipe_knowledge}
+
+Past Key Steps:
+{past_keysteps}
+
+Current Key Step: {current_keystep}
+
+Next Key Step: {next_keystep}
+
+Your task is to generate a concise progress summary that the assistant can use to maintain context. Focus on ESSENTIAL information that affects future steps.
+
+INCLUDE:
+- Current recipe step number and what stage we're at (e.g., "Step 4/7: Sautéing vegetables")
+- Current state of ingredients (e.g., "onions translucent", "chicken browned")
+- What's in pans/bowls/oven and their current status
+- Equipment currently in use
+- Active timers and their purposes
+- Important techniques used that might be referenced later
+- Things that need attention soon
+- User context: skill level demonstrated, dietary substitutions made
+- Critical warnings or reminders (must-do timing, safety concerns)
+- Visual states verifiable in recent frames (e.g., "vegetables showing light char on edges")
+
+EXCLUDE:
+- Granular atomic actions unless they're critical
+- Overly detailed play-by-play of past actions
+- Redundant information
+- General chitchat unrelated to cooking
+- Exact verbatim exchanges (paraphrase instead)
+- Steps that are truly "done and dusted" with no future relevance
+
+FORMATTING:
+- Most recent steps get more detail
+- Earlier steps get compressed unless they have future relevance
+- Be concise but complete
+- Use a structured format similar to:
+
+DISH: [dish name]
+PROGRESS: Step X/Y - [step in recipe and NOT the key steps]
+CURRENT STATE: [what's happening now (include current key step), what's in active use]
+COMPLETED: [high-level summary of what's been done using past key steps, emphasizing items with future impact]
+NEXT: [what needs to happen next based on next key step]
+TIMERS: [any active timers or "None active"]
+NOTES: [user preferences, skill observations, warnings]
+VISUAL: [observable states from recent actions]
+
+Give your response in the following format:
+SUMMARY: <structured progress summary following the format above>
 """
 # fmt: on
 
@@ -503,6 +607,39 @@ def generate_conversation(
     return conv_with_user_type
 
 
+def find_arrow_file_for_video(frames_dir: str, video_uid: str, take_name: Optional[str] = None) -> Optional[str]:
+    """
+    Find the Arrow file for a given video.
+    
+    For most datasets: looks for {video_uid}.arrow
+    For EgoExo4D: looks for {take_name}_downscaled_*aria*.arrow
+    
+    Args:
+        frames_dir: Directory containing frame Arrow files
+        video_uid: The video UID
+        take_name: Optional take name (for EgoExo4D dataset)
+        
+    Returns:
+        Full path to the Arrow file if found, None otherwise
+    """
+    if not os.path.exists(frames_dir):
+        return None
+    
+    # First try direct match with video_uid
+    direct_file = os.path.join(frames_dir, f"{video_uid}.arrow")
+    if os.path.exists(direct_file):
+        return direct_file
+    
+    # If take_name is provided, try EgoExo4D pattern: {take_name}_downscaled_*aria*.arrow
+    if take_name:
+        prefix = f"{take_name}_downscaled_"
+        for filename in os.listdir(frames_dir):
+            if filename.startswith(prefix) and "aria" in filename and filename.endswith(".arrow"):
+                return os.path.join(frames_dir, filename)
+    
+    return None
+
+
 @retry_on_failure()
 def generate_conversation_with_frames(
     goal_description: str,
@@ -512,6 +649,7 @@ def generate_conversation_with_frames(
     additional_requirement: str = "",
     frames_dir: Optional[str] = None,
     video_uid: str = "",
+    take_name: Optional[str] = None,
     use_frames: str = "frames",  # "video" or "frames"
     frames_fps: float = 2.0,
 ) -> list[str]:
@@ -534,17 +672,20 @@ def generate_conversation_with_frames(
     # Load frames if needed
     frames_data = None
     if frames_dir is not None and (use_frames in ["video", "frames"]):
-        arrow_file = os.path.join(frames_dir, f"{video_uid}.arrow")
-        if os.path.exists(arrow_file):
+        arrow_file = find_arrow_file_for_video(frames_dir, video_uid, take_name)
+        if arrow_file and os.path.exists(arrow_file):
             try:
                 frames_data = load_frames_from_arrow(arrow_file)
-                print(f"      Loaded {len(frames_data)} frames for multimodal generation")
+                print(f"      Loaded {len(frames_data)} frames from {os.path.basename(arrow_file)}")
             except Exception as e:
-                print(f"      Warning: Failed to load frames: {e}")
+                print(f"      Warning: Failed to load frames from {arrow_file}: {e}")
                 # Fall back to text-only generation
                 use_frames = "none"
         else:
-            print(f"      Warning: Frame file not found: {arrow_file}")
+            if take_name:
+                print(f"      Warning: Frame file not found for video_uid '{video_uid}' or take_name '{take_name}'")
+            else:
+                print(f"      Warning: Frame file not found for video_uid '{video_uid}'")
             use_frames = "none"
     
     user_reqs = [DIALOG_GEN_USER_REQUIREMENTS[p] for p in user_types]
@@ -680,6 +821,42 @@ def refine_and_label_dialog(conversations: list[list[dict]], llm: LLMGenerator) 
     return refined_conversations
 
 
+def find_current_and_next_keystep(time: float, keystep_segments: list[dict]) -> tuple[Optional[dict], Optional[dict]]:
+    """
+    Find the current and next keystep for a given time.
+    
+    Args:
+        time: The timestamp to check (in seconds)
+        keystep_segments: List of keystep segment dictionaries with start_time, end_time, step_name, step_description, is_essential
+    
+    Returns:
+        Tuple of (current_keystep, next_keystep), where each is a dict or None
+    """
+    if not keystep_segments:
+        return None, None
+    
+    # First, try to find a keystep that contains this time
+    for i, segment in enumerate(keystep_segments):
+        if segment["start_time"] <= time <= segment["end_time"]:
+            # Found the containing keystep, now find the next one
+            next_keystep = keystep_segments[i + 1] if i + 1 < len(keystep_segments) else None
+            return segment, next_keystep
+    
+    # If no containing keystep, find the closest one
+    # Find the last keystep that ended before this time
+    current_keystep = None
+    for i, segment in enumerate(keystep_segments):
+        if segment["end_time"] < time:
+            current_keystep = segment
+        else:
+            # This segment starts after the time, so it might be the next one
+            next_keystep = segment
+            return current_keystep, next_keystep
+    
+    # If we're after all keysteps, the last one is current and there's no next
+    return keystep_segments[-1] if keystep_segments else None, None
+
+
 @retry_on_failure()
 def add_progress_summary(conversation: list[dict], llm: LLMGenerator) -> dict:
     batch_inputs = []
@@ -712,6 +889,105 @@ def add_progress_summary(conversation: list[dict], llm: LLMGenerator) -> dict:
     return conversation
 
 
+@retry_on_failure()
+def add_progress_summary_with_keysteps(
+    conversation: list[dict], 
+    llm: LLMGenerator,
+    task_knowledge: str,
+    keystep_segments: list[dict]
+) -> dict:
+    """
+    Add progress summaries to the conversation with keystep awareness.
+    
+    Args:
+        conversation: List of conversation turns
+        llm: LLM generator
+        task_knowledge: The recipe/task knowledge (inferred or provided)
+        keystep_segments: List of keystep annotations with start_time, end_time, step_name
+    """
+    batch_inputs = []
+    summ_turn_ids = []
+    
+    # Build keysteps context string
+    total_steps = len(keystep_segments)
+    keysteps_list = []
+    for i, seg in enumerate(keystep_segments):
+        keysteps_list.append(
+            f"{i+1}. {seg['step_name']} "
+            f"({seg['start_time']:.1f}s - {seg['end_time']:.1f}s)"
+        )
+    keysteps_context = "\n".join(keysteps_list)
+    
+    for idx, turn in enumerate(conversation):
+        if turn["role"] == "assistant":
+            time = turn["time"]
+            
+            # Find current and next keystep
+            current_step, next_step = find_current_and_next_keystep(time, keystep_segments)
+            
+            # Format current and next step info
+            if current_step:
+                # Find step number
+                step_num = next(
+                    (i+1 for i, s in enumerate(keystep_segments) if s == current_step),
+                    0
+                )
+                current_step_str = current_step['step_name']
+                
+                # Build past keysteps string (all completed keysteps before current)
+                past_keysteps_list = []
+                for i in range(step_num - 1):
+                    past_keysteps_list.append(f"{i+1}. {keystep_segments[i]['step_name']}")
+                past_keysteps_str = "\n".join(past_keysteps_list) if past_keysteps_list else "None (just starting)"
+            else:
+                current_step_str = "Not yet started or between steps"
+                past_keysteps_str = "None (just starting)"
+            
+            if next_step:
+                next_step_str = next_step['step_name']
+            else:
+                next_step_str = "Task nearly complete or complete"
+
+            # print(f"Keysteps for turn at time: {time} | Past: {past_keysteps_str} | Current: {current_step_str} | Next: {next_step_str}")
+
+            # Build dialog history
+            dh = conversation_dict_to_text(conversation[: idx + 1], add_labels=False)
+            
+            # Build prompt
+            prompt = PROGRESS_SUMMARY_WITH_KEYSTEPS_PROMPT_TEMPLATE.format(
+                recipe_knowledge=task_knowledge,
+                past_keysteps=past_keysteps_str,
+                dialog_history=dh,
+                current_keystep=current_step_str,
+                next_keystep=next_step_str
+            )
+            
+            inputs = [("system", SUMMARY_SYS_PROMPT), ("user", prompt)]
+            batch_inputs.append(inputs)
+            summ_turn_ids.append(idx)
+
+    # generate the progress summary in batch
+    batch_outputs = llm.batch_generate(batch_inputs)
+
+    # update the conversation with the progress summary
+    for turn_idx, outputs in zip(summ_turn_ids, batch_outputs):
+        time = conversation[turn_idx]["time"]
+        elsp = f"The time elapsed since the start of the task is {time:.1f} seconds.\n\n"
+
+        # Extract the summary from the output
+        output_text = outputs[0]
+        if "SUMMARY:" in output_text:
+            # Get everything after SUMMARY:
+            summary_start = output_text.find("SUMMARY:")
+            progress = elsp + output_text[summary_start + len("SUMMARY:"):].strip()
+        else:
+            raise ValueError(f"Failed to parse summary from output: {output_text}")
+
+        conversation[turn_idx]["progress"] = progress
+
+    return conversation
+
+
 @dataclass
 class ParsedVideoAnns:
     dataset: str
@@ -728,6 +1004,7 @@ class ParsedVideoAnns:
     has_mistake: bool = False
     num_substeps: Optional[int] = None
     fps: Optional[float] = None
+    take_name: Optional[str] = None  # For EgoExo4D: used to find Arrow files with pattern {take_name}_downscaled_*aria*.arrow
     original_ann: Optional[dict] = None
 
     def to_dict(self) -> dict:
@@ -759,6 +1036,7 @@ def generate_from_annotation(
     frames_dir: Optional[str] = None,
     use_frames: str = "none",
     frames_fps: float = 2.0,
+    use_keysteps: bool = False,
 ) -> Union[GeneratedOutputs, str]:
 
     video_uid = annotation.video_uid
@@ -869,6 +1147,7 @@ def generate_from_annotation(
             goal_description, clips, llm, user_types, add_reqs,
             frames_dir=frames_dir,
             video_uid=video_uid,
+            take_name=annotation.take_name,  # For EgoExo4D: helps find Arrow files
             use_frames=use_frames,
             frames_fps=frames_fps,
         )
@@ -888,13 +1167,45 @@ def generate_from_annotation(
 
     # 4. add progress summary
     print(f"\n📝 STEP 4: Progress Summary Generation")
-    print(f"   Adding progress summaries to assistant turns...")
+    if use_keysteps:
+        print(f"   Using keystep-aware progress summaries...")
+        
+        # Extract keystep segments from original_ann
+        keystep_segments = []
+        if annotation.original_ann and "keystep_annotations" in annotation.original_ann:
+            keystep_anns = annotation.original_ann["keystep_annotations"]
+            if "segments" in keystep_anns:
+                keystep_segments = keystep_anns["segments"]
+                print(f"   Found {len(keystep_segments)} keystep segments")
+            else:
+                print(f"   ⚠️  Warning: No segments in keystep_annotations, falling back to regular summaries")
+                use_keysteps = False
+        else:
+            print(f"   ⚠️  Warning: No keystep_annotations found in annotation, falling back to regular summaries")
+            use_keysteps = False
+        
+        if use_keysteps:
+            # Use the inferred knowledge as task knowledge
+            task_knowledge = inferred_knowledge
+            
+            for i, conv in enumerate(conversations):
+                assistant_turns_before = sum(1 for turn in conv["conversation"] if turn["role"] == "assistant")
+                conv["conversation"] = add_progress_summary_with_keysteps(
+                    conv["conversation"], 
+                    llm, 
+                    task_knowledge, 
+                    keystep_segments
+                )
+                assistant_turns_after = sum(1 for turn in conv["conversation"] if turn["role"] == "assistant" and "progress" in turn)
+                print(f"      Conversation {i+1}: Added keystep-aware summaries to {assistant_turns_after}/{assistant_turns_before} assistant turns")
     
-    for i, conv in enumerate(conversations):
-        assistant_turns_before = sum(1 for turn in conv["conversation"] if turn["role"] == "assistant")
-        conv["conversation"] = add_progress_summary(conv["conversation"], llm)
-        assistant_turns_after = sum(1 for turn in conv["conversation"] if turn["role"] == "assistant" and "progress" in turn)
-        print(f"      Conversation {i+1}: Added summaries to {assistant_turns_after}/{assistant_turns_before} assistant turns")
+    if not use_keysteps:
+        print(f"   Adding standard progress summaries to assistant turns...")
+        for i, conv in enumerate(conversations):
+            assistant_turns_before = sum(1 for turn in conv["conversation"] if turn["role"] == "assistant")
+            conv["conversation"] = add_progress_summary(conv["conversation"], llm)
+            assistant_turns_after = sum(1 for turn in conv["conversation"] if turn["role"] == "assistant" and "progress" in turn)
+            print(f"      Conversation {i+1}: Added summaries to {assistant_turns_after}/{assistant_turns_before} assistant turns")
 
     print(f"✅ Progress summaries completed")
 

@@ -172,7 +172,7 @@ def image_to_base64_data_url(image: Image.Image, format: str = "JPEG") -> str:
 def describe_frame_with_llm(
     frame: Image.Image,
     llm: LLMGenerator,
-    prompt: str = "Describe what you see in this image in one concise sentence (around 15-20 words). Focus on the key objects, actions, and environment relevant to the task being performed. Be specific and factual.",
+    prompt: str = "You are viewing an egocentric (first-person) video frame of someone cooking in a kitchen. Describe the most important visual information that would help a kitchen assistant provide better guidance. In 2-3 concise sentences (30-50 words), focus on: (1) Key ingredients, tools, or cooking vessels visible and their state (e.g., 'pan is heating', 'knife is on the cutting board', 'onions are translucent'), (2) Any visual cues about cooking progress or technique (e.g., 'oil shimmering', 'vegetables browning', 'steam rising').",
 ) -> str:
     """Generate a textual description of a frame using an LLM.
     
@@ -187,27 +187,20 @@ def describe_frame_with_llm(
     # Convert frame to base64 data URL
     frame_data_url = image_to_base64_data_url(frame)
     
-    # Create message with image
-    # OpenRouter supports vision models with image URLs in content
-    messages = [
-        ("user", [
-            {"type": "text", "text": prompt},
-            {"type": "image_url", "image_url": {"url": frame_data_url}}
-        ])
+    # Create multimodal message with image
+    # The content is a list with text and image components
+    multimodal_content = [
+        {"type": "text", "text": prompt},
+        {"type": "image_url", "image_url": {"url": frame_data_url}}
     ]
+    
+    # Pass the multimodal content to the LLM
+    # The LLMGenerator should support this format for vision models
+    messages = [("user", multimodal_content)]
     
     # Generate description
     try:
-        # For vision models, we need to pass the content as a structured list
-        # But our current LLMGenerator expects string content
-        # We'll need to make a direct call to the OpenRouter API with proper formatting
-        
-        # For now, let's use a simpler approach - just pass the prompt
-        # and rely on the model's multimodal capabilities if available
-        # This is a placeholder - in practice you'd need to modify the LLMGenerator
-        # to support multimodal inputs
-        
-        response = llm.generate([("user", prompt)])
+        response = llm.generate(messages)
         return response[0].strip()
     
     except Exception as e:
