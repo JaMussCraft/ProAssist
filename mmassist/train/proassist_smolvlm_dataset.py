@@ -29,6 +29,31 @@ class ProAssistSmolVLMDataset:
         self.image_token_id = processor.tokenizer.additional_special_tokens_ids[
             processor.tokenizer.additional_special_tokens.index("<image>")
         ]
+        
+        # Determine image tokens per frame based on model
+        # Extract model name from processor's model config
+        model_name = getattr(processor, 'model_name', None) or getattr(processor, '_model_name', None)
+        if model_name is None and hasattr(processor, 'image_processor') and hasattr(processor.image_processor, '_name_or_path'):
+            model_name = processor.image_processor._name_or_path
+        if model_name is None and hasattr(processor, 'tokenizer') and hasattr(processor.tokenizer, 'name_or_path'):
+            model_name = processor.tokenizer.name_or_path
+        
+        self.model_name = model_name or "unknown"
+        
+        # Set tokens per image and max images per sample based on model
+        if "SmolVLM2-500M" in self.model_name or "500M" in self.model_name:
+            self.tokens_per_image = 320
+            self.max_images_per_sample = 22
+        elif "SmolVLM2-2.2B" in self.model_name or "2.2B" in self.model_name or "2B" in self.model_name:
+            self.tokens_per_image = 405
+            self.max_images_per_sample = 18
+        else:
+            # Default to 320 for unknown models
+            self.tokens_per_image = 320
+            self.max_images_per_sample = 22
+            self.logger.warning(f"Unknown model '{self.model_name}', defaulting to 320 tokens per image and 22 max images")
+        
+        self.logger.info(f"Using {self.tokens_per_image} tokens per image and max {self.max_images_per_sample} images per sample for model: {self.model_name}")
 
         # Generate cache file path based on dataset and parameters
         self.cache_file_path = self._generate_cache_file_path()
@@ -52,8 +77,18 @@ class ProAssistSmolVLMDataset:
         
         dataset_name, samples = dataset_parts
         
-        # Create filename with all relevant parameters
-        filename = f"smolvlm_processed_{samples}_4to1_{self.use_4_1_aspect_ratio}_sampling_{self.frame_sampling_ratio}_context_{self.context_size_limit}.pkl"
+        # Extract a clean model identifier from the model name
+        model_id = "unknown"
+        if "500M" in self.model_name:
+            model_id = "500M"
+        elif "2.2B" in self.model_name or "2B" in self.model_name:
+            model_id = "2B"
+        elif self.model_name != "unknown":
+            # Use a simplified version of the model name
+            model_id = self.model_name.split('/')[-1].replace('-', '_')
+        
+        # Create filename with all relevant parameters including model
+        filename = f"smolvlm_processed_{samples}_model_{model_id}_4to1_{self.use_4_1_aspect_ratio}_sampling_{self.frame_sampling_ratio}_context_{self.context_size_limit}.pkl"
         
         # Create directory path
         cache_dir = f"/projects/beto/proassist_data/processed_data/{dataset_name}/prepared_smolvlm"
@@ -65,6 +100,7 @@ class ProAssistSmolVLMDataset:
         """Load split samples from cache file."""
         with open(self.cache_file_path, 'rb') as f:
             self.split_samples = pickle.load(f)
+            # self.split_samples = self.split_samples[:250] # temp
         self.logger.info(f"Loaded {len(self.split_samples)} split samples from cache")
     
     def _save_split_samples(self):
@@ -194,8 +230,11 @@ class ProAssistSmolVLMDataset:
         Count tokens for a single message with optional images.
         Returns (total_tokens, image_tokens).
         
-        Uses a fixed token count (320) per image for efficiency instead of
+        Uses a fixed token count per image for efficiency instead of
         actually processing images through the processor.
+        Token count depends on the model:
+        - 320 for SmolVLM2-500M-Video-Instruct
+        - 405 for SmolVLM2-2.2B-Instruct
         """
         # For image-only messages, use fixed token count per image
         if images and len(images) > 0:
@@ -206,9 +245,9 @@ class ProAssistSmolVLMDataset:
             )
             
             if is_image_only:
-                # Each image is assumed to be encoded into 320 tokens
+                # Each image is encoded into a model-specific number of tokens
                 num_images = len(images)
-                image_tokens = num_images * 320
+                image_tokens = num_images * self.tokens_per_image
                 return image_tokens, image_tokens
         
         # For text or mixed messages, process normally
@@ -310,7 +349,7 @@ class ProAssistSmolVLMDataset:
                 # Sample frames based on sampling ratio
                 sampled_frame_count = min(max(
                     1, int(num_frames * self.frame_sampling_ratio)
-                ), 22)
+                ), self.max_images_per_sample)
 
                 if sampled_frame_count > 0:
                     step = max(1, num_frames // sampled_frame_count)
