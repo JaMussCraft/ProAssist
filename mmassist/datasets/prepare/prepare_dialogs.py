@@ -8,6 +8,7 @@ import multiprocessing as mp
 import time
 from tqdm import tqdm
 from dataclasses import dataclass
+from typing import Optional
 import datasets as hf_datasets
 
 from mmassist.configs.arguments import ModelArguments, HfArgumentParser
@@ -44,6 +45,39 @@ class DataPrepareArgs:
     save_prefix: str = "dialog"
     keep_ctx_length: tuple[int, int] = (5, 20)
     num_proc: int = mp.cpu_count()
+
+
+def find_arrow_file_for_video(frames_dir: str, video_uid: str, take_name: Optional[str] = None) -> Optional[str]:
+    """
+    Find the Arrow file for a given video.
+    
+    For most datasets: looks for {video_uid}.arrow
+    For EgoExo4D: looks for {take_name}_downscaled_*aria*.arrow
+    
+    Args:
+        frames_dir: Directory containing frame Arrow files
+        video_uid: The video UID
+        take_name: Optional take name (for EgoExo4D dataset)
+        
+    Returns:
+        Full path to the Arrow file if found, None otherwise
+    """
+    if not os.path.exists(frames_dir):
+        return None
+    
+    # First try direct match with video_uid
+    direct_file = os.path.join(frames_dir, f"{video_uid}.arrow")
+    if os.path.exists(direct_file):
+        return direct_file
+    
+    # If take_name is provided, try EgoExo4D pattern: {take_name}_downscaled_*aria*.arrow
+    if take_name:
+        prefix = f"{take_name}_downscaled_"
+        for filename in os.listdir(frames_dir):
+            if filename.startswith(prefix) and "aria" in filename and filename.endswith(".arrow"):
+                return os.path.join(frames_dir, filename)
+    
+    return None
 
 
 if __name__ == "__main__":
@@ -91,16 +125,32 @@ if __name__ == "__main__":
             return []
         if args.dataset == "ego4d":
             video_uid = video_uid.replace("grp-", "")
+        
+        # Extract take_name if available (for EgoExo4D dataset)
+        take_name = ann.get("take_name") or ann.get("parsed_video_anns", {}).get("take_name")
+        
+        # Determine frame file path based on dataset
         if args.dataset != "assembly101":
             frame_file = f"frames/{video_uid}.arrow"
         else:
             frame_file_name = video_uid.split("_", 1)[1]
             frame_file = f"frames/{frame_file_name}.arrow"
+        
+        # Build absolute path and try to find the file
+        frames_dir = os.path.join(os.path.dirname(args.output_dir), "frames")
         frame_file_abs = os.path.join(os.path.dirname(args.output_dir), frame_file)
+        
+        # If the direct path doesn't exist, try the enhanced search
         if not os.path.exists(frame_file_abs):
-            print(f"Frame file {frame_file} does not exist.")
-            return []
-
+            found_file = find_arrow_file_for_video(frames_dir, video_uid, take_name)
+            if found_file:
+                frame_file_abs = found_file
+                # Update relative path for later storage
+                frame_file = os.path.relpath(frame_file_abs, os.path.dirname(args.output_dir))
+            else:
+                print(f"Frame file {frame_file} does not exist.")
+                return []
+        
         all_frames_in_video = hf_datasets.Dataset.from_file(frame_file_abs)
         len_frames = len(all_frames_in_video)
 
