@@ -81,17 +81,16 @@ DIALOG_GEN_USER_REQUIREMENTS = {
     "no_talk": "- The user follows the assistant's instructions and does not talk.",
     "talk_some": (
         "- The user is moderately engaged and speaks up regularly throughout the task.\n"
-        "- Aim for approximately 30-40% of all conversational turns to be from the user (if there are 10 total turns, 3-4 should be user turns).\n"
+        "- Aim for approximately 20-30% of all conversational turns to be from the user (if there are 10 total turns, 2-3 should be user turns).\n"
         "- User behaviors include:\n"
         "  * Asking clarifying questions about instructions (e.g., 'How long should I cook this?', 'Which bowl should I use?')\n"
         "  * Confirming understanding before proceeding (e.g., 'So I mix these together first?', 'Should I turn up the heat?')\n"
-        "  * Reporting completion of steps (e.g., 'Done chopping', 'The water is boiling now')\n"
-        "  * Asking about next steps occasionally (e.g., 'What's next?', 'Is this ready?')\n"
         "  * Expressing uncertainty or hesitation (e.g., 'I'm not sure if this is right', 'Does this look okay?')\n"
+        "  * Asking visual-based questions about what they observe (e.g., 'Is this the right color?', 'Does this look done?', 'Should it be bubbling like this?')\n"
     ),
     "talk_more": (
         "- The user is highly engaged, talkative, and interactive throughout the entire task.\n"
-        "- Aim for approximately 50-60% of all conversational turns to be from the user (if there are 10 total turns, 5-6 should be user turns).\n"
+        "- Aim for approximately 40-50% of all conversational turns to be from the user (if there are 10 total turns, 4-5 should be user turns).\n"
         "- User behaviors include:\n"
         "  * Frequently asking clarifying questions (e.g., 'Should the heat be medium or high?', 'How finely should I chop this?')\n"
         "  * Regularly confirming understanding (e.g., 'Just to confirm, I stir clockwise?', 'You mean the red pepper, right?')\n"
@@ -101,13 +100,16 @@ DIALOG_GEN_USER_REQUIREMENTS = {
         "  * Making small talk related OR unrelated to the task (e.g., 'I've never made this before', 'My friend loves this dish', 'It's hot in here')\n"
         "  * Asking proactive questions about future steps (e.g., 'What comes after this?', 'Do I need to prepare anything else?')\n"
         "  * Expressing emotions and reactions (e.g., 'This is harder than I thought', 'Wow, that smells great!', 'Oops!')\n"
+        "  * Asking visual-based questions about what they see (e.g., 'Is this brown enough?', 'Does this look like the right texture?', 'Is it supposed to look like this?', 'Should there be this much steam?')\n"
     )
 }
 
 DIALOG_GEN_PROMPT_TEMPLATE = """Here is a video description of an user working on the task - {goal_description}:
 {step_descriptions}
 
-Your goal is to simulate a conversation between the user and an assistant, where the user's actions are performed following the assistant's instructions. The user will first mention the overall goal of the task. The assistant informs the user about the next step at proper time. Importantly, the assistant is proactive and always provides the next step even before the user asks for it. Before the task starts, the assistant may also give a brief introduction about the task. {additional_requirement}
+Note: Visual information describing what the user is seeing is embedded in the descriptions as "(image shows: ...)". The user should ask visual-based questions referring to what they observe.
+
+Your goal is to simulate a conversation between the user and an assistant, where the user's actions are performed following the assistant's instructions. The user SHOULD first mention the overall goal of the task. The assistant informs the user about the next step at proper time. Importantly, the assistant is proactive and always provides the next step even before the user asks for it. Before the task starts, the assistant may also give a brief introduction about the task. {additional_requirement}
 
 Requirements for the assistant:
 - Time is crucial! Try to generate the dialog that strictly aligns with the video timeline.
@@ -116,6 +118,10 @@ Requirements for the assistant:
 - Try to be encouraging when the user makes progress, but do not overdo it.
 - Be concise! The dialog is verbal, so avoid long sentences.
 - Do not say "can you do it for me" to the user.
+- When responding to visual questions, reference the visual information from "(image shows: ...)" descriptions to provide context-aware answers.
+- Avoid redundant instructions that can be easily inferred from context using common sense. Treat the user as a fully functional adult. Focus on essential instructions only.
+  * Example: Instead of "Pick up the tea leaves container from the shelf and open it. Pick up the measuring spoon from inside the tea leaves container. Scoop some tea leaves from the container with the measuring spoon and pour them into the pot on the stove top.", say "Pick up the tea leaves container from the shelf. Then use the measuring spoon inside the container to scoop some tea leaves and pour them into the pot on the stove top."
+  * Example: Instead of "Place your left hand on the stove knob and turn off the stove.", say "Turn off the stove by turning the knob."
 
 
 Requirements for the user:
@@ -140,7 +146,7 @@ In this round, please **only** generate the dialog for the video from time [{sta
 DIALOG_GEN_PROMPT_TEMPLATE_WITH_VIDEO = """Here is a video description of an user working on the task - {goal_description}:
 {step_descriptions}
 
-A video clip showing this part of the task is also provided for your reference.
+A video clip showing this part of the task from the user perspective is also provided for your reference. The user should ask visual-based questions referring to what they observe.
 
 Your goal is to simulate a conversation between the user and an assistant, where the user's actions are performed following the assistant's instructions. The user will first mention the overall goal of the task. The assistant informs the user about the next step at proper time. Importantly, the assistant is proactive and always provides the next step even before the user asks for it. Before the task starts, the assistant may also give a brief introduction about the task. {additional_requirement}
 
@@ -151,6 +157,10 @@ Requirements for the assistant:
 - Try to be encouraging when the user makes progress, but do not overdo it.
 - Be concise! The dialog is verbal, so avoid long sentences.
 - Do not say "can you do it for me" to the user.
+- When responding to visual questions, use the provided video clip to give accurate, context-aware answers about visual states and progress.
+- Avoid redundant instructions that can be easily inferred from context using common sense. Treat the user as a fully functional adult. Focus on essential instructions only.
+  * Example: Instead of "Pick up the tea leaves container from the shelf and open it. Pick up the measuring spoon from inside the tea leaves container. Scoop some tea leaves from the container with the measuring spoon and pour them into the pot on the stove top.", say "Pick up the tea leaves container from the shelf. Then use the measuring spoon inside the container to scoop some tea leaves and pour them into the pot on the stove top."
+  * Example: Instead of "Place your left hand on the stove knob and turn off the stove.", say "Turn off the stove by turning the knob."
 
 
 Requirements for the user:
@@ -173,7 +183,7 @@ In this round, please **only** generate the dialog for the video from time [{sta
 DIALOG_GEN_PROMPT_TEMPLATE_WITH_FRAMES = """Here is a video description of an user working on the task - {goal_description}:
 {step_descriptions}
 
-Key frames from the video are provided alongside the descriptions to give you visual context.
+Key frames from the video in the user's perspective are provided alongside the descriptions to give you visual context. The user should ask visual-based questions referring to what they observe.
 
 Your goal is to simulate a conversation between the user and an assistant, where the user's actions are performed following the assistant's instructions. The user will first mention the overall goal of the task. The assistant informs the user about the next step at proper time. Importantly, the assistant is proactive and always provides the next step even before the user asks for it. Before the task starts, the assistant may also give a brief introduction about the task. {additional_requirement}
 
@@ -184,6 +194,10 @@ Requirements for the assistant:
 - Try to be encouraging when the user makes progress, but do not overdo it.
 - Be concise! The dialog is verbal, so avoid long sentences.
 - Do not say "can you do it for me" to the user.
+- When responding to visual questions, reference the provided key frames to give accurate, context-aware answers about visual states, colors, textures, and cooking progress.
+- Avoid redundant instructions that can be easily inferred from context using common sense. Treat the user as a fully functional adult. Focus on essential instructions only.
+  * Example: Instead of "Pick up the tea leaves container from the shelf and open it. Pick up the measuring spoon from inside the tea leaves container. Scoop some tea leaves from the container with the measuring spoon and pour them into the pot on the stove top.", say "Pick up the tea leaves container from the shelf. Then use the measuring spoon inside the container to scoop some tea leaves and pour them into the pot on the stove top."
+  * Example: Instead of "Place your left hand on the stove knob and turn off the stove.", say "Turn off the stove by turning the knob."
 
 
 Requirements for the user:
