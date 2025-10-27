@@ -3,45 +3,6 @@ Fine-tune SmolVLM-Instruct on ProAssist dataset for streaming video assistance.
 
 This script adapts the SmolVLM fine-tuning approach to work with ProAssist's
 multi-modal conversation format with temporal video frames.
-
-LoRA Adapter Training & Combination:
-------------------------------------
-This script saves LoRA adapters that can be easily combined later. When using
---use_lora=True, only the adapter weights are saved, not the full model.
-
-To train separate adapters on different datasets:
-    python finetune_smolvlm.py --train_datasets dataset1 --output_dir ./adapter1
-    python finetune_smolvlm.py --train_datasets dataset2 --output_dir ./adapter2
-
-To combine multiple LoRA adapters after training:
-
-    from peft import PeftModel
-    from transformers import AutoProcessor, Idefics3ForConditionalGeneration
-    
-    # Load base model
-    base_model = Idefics3ForConditionalGeneration.from_pretrained(
-        "HuggingFaceTB/SmolVLM-Instruct"
-    )
-    
-    # Method 1: Load adapters sequentially (weighted average)
-    from peft import set_peft_model_state_dict, get_peft_model_state_dict
-    model = PeftModel.from_pretrained(base_model, "./adapter1")
-    
-    # Method 2: Use PEFT's weighted combination (requires PEFT >= 0.6.0)
-    from peft import load_peft_weights
-    adapters = ["./adapter1", "./adapter2"]
-    weights = [0.5, 0.5]  # Equal weighting
-    # Combine using PEFT utilities or manual weighted averaging
-    
-    # Method 3: Load multiple adapters and switch between them
-    model = PeftModel.from_pretrained(base_model, "./adapter1", adapter_name="adapter1")
-    model.load_adapter("./adapter2", adapter_name="adapter2")
-    model.set_adapter("adapter1")  # Switch to adapter1
-    
-Each saved adapter directory contains:
-    - adapter_config.json: LoRA configuration
-    - adapter_model.safetensors (or .bin): Adapter weights
-    - adapter_metadata.json: Training dataset info and hyperparameters
 """
 
 import os
@@ -295,6 +256,14 @@ class SmolVLMTrainingArguments(TrainingArguments):
     dataloader_prefetch_factor: Optional[int] = field(default=None, metadata={"help": "Number of batches loaded in advance by each worker. None means 2 if num_workers > 0."})
     w2t_loss_weight: float = field(default=0.5, metadata={"help": "Weight for w2t loss (0.0-1.0). Assistant loss weight is inferred as 1 - w2t_loss_weight. Mutually exclusive with use_inverse_freq_weighting."})
     use_inverse_freq_weighting: bool = field(default=False, metadata={"help": "If True, use inverse frequency weighting per batch for label types. Mutually exclusive with w2t_loss_weight (which should be set to 0.5 when this is enabled)."})
+    early_stopping: bool = field(default=False, metadata={"help": "If True, stop training after eval loss starts increasing and checkpoint is saved. Allows verification of the checkpoint before stopping completely."})
+    speaking_eval_only: bool = field(default=False, metadata={"help": "If True, skip training and only run speaking decision evaluation on the specified model."})
+    speaking_eval_checkpoint: Optional[str] = field(default=None, metadata={"help": "Path to LoRA adapter checkpoint for speaking evaluation. If None, uses base model."})
+    use_profiler: bool = field(default=False, metadata={"help": "Enable PyTorch profiler to track GPU utilization, memory usage, and performance over time. Results saved to TensorBoard."})
+    profiler_schedule_wait: int = field(default=5, metadata={"help": "Number of steps to skip before profiling starts."})
+    profiler_schedule_warmup: int = field(default=1, metadata={"help": "Number of steps for profiler warmup."})
+    profiler_schedule_active: int = field(default=5, metadata={"help": "Number of steps to actively profile."})
+    profiler_schedule_repeat: int = field(default=5, metadata={"help": "Number of times to repeat the profiling cycle."})
 
 
 @dataclass
@@ -562,6 +531,44 @@ class SmolVLMProAssistTrainer(Trainer):
         self.no_assistant = no_assistant
         self.step_count = 0
         self.logger = logging.getLogger(__name__)
+        
+        # Early stopping tracking
+        self.best_eval_loss = float('inf')
+        self.eval_loss_increased = False
+        self.checkpoint_saved_after_increase = False
+        
+        # Setup PyTorch profiler if enabled
+        self.profiler = None
+        if self.args.use_profiler:
+            from torch.profiler import profile, ProfilerActivity, schedule, tensorboard_trace_handler
+            
+            profiler_schedule = schedule(
+                wait=self.args.profiler_schedule_wait,
+                warmup=self.args.profiler_schedule_warmup,
+                active=self.args.profiler_schedule_active,
+                repeat=self.args.profiler_schedule_repeat
+            )
+            
+            self.profiler = profile(
+                activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA],
+                schedule=profiler_schedule,
+                on_trace_ready=tensorboard_trace_handler(self.args.logging_dir),
+                record_shapes=True,
+                profile_memory=True,
+                with_stack=True
+            )
+            
+            self.logger.info("=" * 70)
+            self.logger.info("PyTorch Profiler Enabled")
+            self.logger.info("=" * 70)
+            self.logger.info(f"  Wait steps: {self.args.profiler_schedule_wait}")
+            self.logger.info(f"  Warmup steps: {self.args.profiler_schedule_warmup}")
+            self.logger.info(f"  Active steps: {self.args.profiler_schedule_active}")
+            self.logger.info(f"  Repeat cycles: {self.args.profiler_schedule_repeat}")
+            self.logger.info(f"  Total profiling steps: {(self.args.profiler_schedule_wait + self.args.profiler_schedule_warmup + self.args.profiler_schedule_active) * self.args.profiler_schedule_repeat}")
+            self.logger.info(f"  Results will be saved to: {self.args.logging_dir}")
+            self.logger.info("  View results in TensorBoard under PYTORCH_PROFILER tab")
+            self.logger.info("=" * 70)
 
     def compute_loss(self, model, inputs, return_outputs=False, num_items_in_batch=None):
         """
@@ -866,6 +873,11 @@ class SmolVLMProAssistTrainer(Trainer):
         step_start_time = time.time()
         self.step_count += 1
         
+        # Start profiler if enabled
+        if self.profiler is not None and self.step_count == 1:
+            self.profiler.start()
+            self.logger.info("PyTorch Profiler started")
+        
         # Check if we have collate timing info
         collate_end_time = inputs.pop("_collate_end_time", None)
         if collate_end_time is not None:
@@ -883,6 +895,10 @@ class SmolVLMProAssistTrainer(Trainer):
         
         # Call parent training step (this handles GPU transfer internally)
         loss = super().training_step(model, inputs, num_items_in_batch)
+        
+        # Step profiler if enabled
+        if self.profiler is not None:
+            self.profiler.step()
         
         forward_time = time.time() - forward_start
         total_step_time = time.time() - step_start_time
@@ -903,6 +919,29 @@ class SmolVLMProAssistTrainer(Trainer):
         
         return loss
 
+    def _save_checkpoint(self, model, trial, metrics=None):
+        """
+        Override checkpoint saving to implement early stopping after save.
+        This ensures we have the checkpoint available before stopping.
+        """
+        # Call parent's save checkpoint
+        checkpoint_folder = super()._save_checkpoint(model, trial, metrics)
+        
+        # Check if we should stop training after this checkpoint
+        if self.args.early_stopping and self.eval_loss_increased:
+            self.logger.info("=" * 70)
+            self.logger.info("🛑 EARLY STOPPING: Checkpoint saved after eval loss increase detected")
+            self.logger.info(f"   Best eval loss: {self.best_eval_loss:.6f}")
+            self.logger.info(f"   Checkpoint saved to: {checkpoint_folder}")
+            self.logger.info("   Training will stop now. You can run inference on this checkpoint")
+            self.logger.info("   to verify that early stopping was justified.")
+            self.logger.info("=" * 70)
+            self.checkpoint_saved_after_increase = True
+            # Set should_training_stop to True to stop training
+            self.state.should_training_stop = True
+        
+        return checkpoint_folder
+
     def compute_metrics(self, eval_pred):
         """
         Compute metrics for evaluation. This is required for Trainer to run evaluation.
@@ -914,6 +953,7 @@ class SmolVLMProAssistTrainer(Trainer):
     def evaluate(self, eval_dataset=None, ignore_keys=None, metric_key_prefix="eval"):
         """
         Override evaluate to include both standard metrics and speaking decision evaluation.
+        Also implements early stopping logic if enabled.
         """
         self.logger.info("=" * 50)
         self.logger.info(f"EVALUATION STARTING at step {self.state.global_step}")
@@ -927,6 +967,26 @@ class SmolVLMProAssistTrainer(Trainer):
         metrics = super().evaluate(eval_dataset, ignore_keys, metric_key_prefix)
         
         self.logger.info(f"Standard evaluation complete. Loss: {metrics.get(f'{metric_key_prefix}_loss', 'N/A')}")
+        
+        # Early stopping logic
+        if self.args.early_stopping:
+            current_eval_loss = metrics.get(f'{metric_key_prefix}_loss', None)
+            if current_eval_loss is not None:
+                if current_eval_loss < self.best_eval_loss:
+                    # Loss improved
+                    self.logger.info(f"Eval loss improved: {self.best_eval_loss:.6f} -> {current_eval_loss:.6f}")
+                    self.best_eval_loss = current_eval_loss
+                    self.eval_loss_increased = False
+                elif current_eval_loss > self.best_eval_loss:
+                    # Loss increased - mark for early stopping
+                    if not self.eval_loss_increased:
+                        self.logger.warning(f"⚠️ EARLY STOPPING TRIGGERED: Eval loss increased from {self.best_eval_loss:.6f} to {current_eval_loss:.6f}")
+                        self.logger.warning(f"Training will continue until next checkpoint is saved, then stop.")
+                        self.eval_loss_increased = True
+                    else:
+                        self.logger.warning(f"Eval loss continues to increase: {current_eval_loss:.6f} (best was {self.best_eval_loss:.6f})")
+                else:
+                    self.logger.info(f"Eval loss unchanged: {current_eval_loss:.6f}")
         
         # Clean memory between evaluation passes
         force_cleanup()
@@ -974,6 +1034,7 @@ class SmolVLMProAssistTrainer(Trainer):
                   - w2t positions (negative frames)
                   - talk positions (positive frames)
                   - both positions combined
+                  - trends across context window sections (5 sections of 1500 tokens each)
         """
         import torch.nn.functional as F
         
@@ -992,6 +1053,26 @@ class SmolVLMProAssistTrainer(Trainer):
         talk_position_probs = []  # W2T probabilities at talk positions
         total_w2t_positions = 0
         total_talk_positions = 0
+        
+        # Track metrics by context window section (5 sections of 1500 tokens each)
+        NUM_SECTIONS = 5
+        SECTION_SIZE = 1500
+        MAX_CONTEXT = 7500
+        
+        # For samples >= 5000 tokens: track all metrics by section
+        section_w2t_probs = [[] for _ in range(NUM_SECTIONS)]  # W2T probs at w2t positions by section
+        section_talk_probs = [[] for _ in range(NUM_SECTIONS)]  # W2T probs at talk positions by section
+        section_w2t_counts = [0] * NUM_SECTIONS  # Count of w2t positions by section
+        section_talk_counts = [0] * NUM_SECTIONS  # Count of talk positions by section
+        section_w2t_losses = [[] for _ in range(NUM_SECTIONS)]  # Losses at w2t positions by section
+        section_talk_losses = [[] for _ in range(NUM_SECTIONS)]  # Losses at talk positions by section
+        
+        # For samples < 5000 tokens: only log counts (not recorded in metrics)
+        short_sample_count = 0
+        short_sample_sections = []  # List of (sample_length, [w2t_counts], [talk_counts]) for logging
+        
+        # Track target tokens at talk positions
+        talk_target_token_counts = {}  # {token_id: count}
         
         eval_dataloader = self.get_eval_dataloader(eval_dataset)
         
@@ -1016,11 +1097,23 @@ class SmolVLMProAssistTrainer(Trainer):
                 
                 # Process each sample in the batch
                 for i, sample_input_ids in enumerate(input_ids):
+                    # Get the actual sequence length (non-padding tokens)
+                    sample_attention_mask = attention_mask[i]
+                    sample_length = sample_attention_mask.sum().item()
+                    
                     # Get learning ranges for this sample (same as training)
                     learn_ranges = get_smolvlm_learn_ranges(
                         sample_input_ids, 
                         frame_sampling_rate=self.w2t_frame_sampling_rate
                     )
+                    
+                    # Determine if this is a short sample (< 5000 tokens)
+                    is_short_sample = sample_length < 5000
+                    
+                    # Initialize section counters for this sample
+                    if is_short_sample:
+                        sample_w2t_counts = [0] * NUM_SECTIONS
+                        sample_talk_counts = [0] * NUM_SECTIONS
                     
                     # Extract speaking decision positions and w2t probabilities
                     for start_idx, end_idx, label_type in learn_ranges:
@@ -1033,13 +1126,79 @@ class SmolVLMProAssistTrainer(Trainer):
                                 probs = F.softmax(position_logits, dim=-1)
                                 w2t_prob = probs[self.w2t_token_id].item()
                                 
-                                # Track w2t probability by position type
+                                # Compute loss at this position
+                                # For w2t positions: target is w2t_token_id
+                                # For talk positions: target is the next token (end_idx + 1)
+                                if label_type == 'w2t':
+                                    target_token_id = self.w2t_token_id
+                                else:  # 'talk'
+                                    # Get the actual target token (the token after <end_of_utterance>)
+                                    if end_idx + 1 < len(sample_input_ids):
+                                        target_token_id = sample_input_ids[end_idx + 1].item() # CHECK: is this actually the next-next token?
+                                    else:
+                                        continue  # Skip if no target available
+                                
+                                # Compute cross-entropy loss for this position
+                                loss_fct = torch.nn.CrossEntropyLoss(reduction='none')
+                                position_loss = loss_fct(position_logits.unsqueeze(0), torch.tensor([target_token_id], device=position_logits.device))
+                                position_loss_value = position_loss.item()
+                                
+                                # Determine which section this position belongs to
+                                if is_short_sample:
+                                    # For short samples, divide into 5 equal sections based on sample length
+                                    section_idx = min(int(start_idx / (sample_length / NUM_SECTIONS)), NUM_SECTIONS - 1)
+                                else:
+                                    # For long samples (>= 5000), use fixed 1500-token sections
+                                    section_idx = min(int(start_idx / SECTION_SIZE), NUM_SECTIONS - 1)
+                                
+                                # Track overall metrics (all samples)
                                 if label_type == 'w2t':
                                     w2t_position_probs.append(w2t_prob)
                                     total_w2t_positions += 1
                                 else:  # 'talk'
                                     talk_position_probs.append(w2t_prob)
                                     total_talk_positions += 1
+                                    
+                                    # Track target token counts for talk positions
+                                    talk_target_token_counts[target_token_id] = talk_target_token_counts.get(target_token_id, 0) + 1
+                                    
+                                    # Debug: Log next 3 tokens after talk position
+                                    if total_talk_positions <= 5:  # Only log first 5 talk positions to avoid spam
+                                        next_3_token_ids = []
+                                        next_3_tokens_str = []
+                                        for offset in range(1, 4):
+                                            if end_idx + offset < len(sample_input_ids):
+                                                token_id = sample_input_ids[end_idx + offset].item()
+                                                next_3_token_ids.append(token_id)
+                                                try:
+                                                    token_str = self.processor.tokenizer.decode([token_id])
+                                                    next_3_tokens_str.append(f"'{token_str}'")
+                                                except:
+                                                    next_3_tokens_str.append(f"<decode_error>")
+                                        logger.info(f"Talk pos #{total_talk_positions}: Next 3 tokens = {next_3_token_ids} = [{', '.join(next_3_tokens_str)}]")
+                                
+                                # Track by section
+                                if is_short_sample:
+                                    # For short samples, only track counts (for logging)
+                                    if label_type == 'w2t':
+                                        sample_w2t_counts[section_idx] += 1
+                                    else:  # 'talk'
+                                        sample_talk_counts[section_idx] += 1
+                                else:
+                                    # For long samples (>= 5000), track probs, counts, and losses (for metrics)
+                                    if label_type == 'w2t':
+                                        section_w2t_probs[section_idx].append(w2t_prob)
+                                        section_w2t_counts[section_idx] += 1
+                                        section_w2t_losses[section_idx].append(position_loss_value)
+                                    else:  # 'talk'
+                                        section_talk_probs[section_idx].append(w2t_prob)
+                                        section_talk_counts[section_idx] += 1
+                                        section_talk_losses[section_idx].append(position_loss_value)
+                    
+                    # Store short sample data for logging
+                    if is_short_sample:
+                        short_sample_count += 1
+                        short_sample_sections.append((sample_length, sample_w2t_counts, sample_talk_counts))
                 
                 # Clean up batch tensors to free memory
                 del input_ids, attention_mask, pixel_values, outputs, logits
@@ -1082,7 +1241,56 @@ class SmolVLMProAssistTrainer(Trainer):
             metrics['both_pos_prob_mean'] = float(np.mean(all_probs_array))
             metrics['both_pos_prob_variance'] = float(np.var(all_probs_array))
         
-        logger.info("Speaking Decision Evaluation Results:")
+        # Add section-based metrics (for samples >= 5000 tokens)
+        for section_idx in range(NUM_SECTIONS):
+            section_start = section_idx * SECTION_SIZE
+            section_end = (section_idx + 1) * SECTION_SIZE
+            
+            # W2T position metrics for this section
+            if section_w2t_probs[section_idx]:
+                w2t_probs_array = np.array(section_w2t_probs[section_idx])
+                metrics[f'section_{section_idx}_w2t_prob_mean'] = float(np.mean(w2t_probs_array))
+                metrics[f'section_{section_idx}_w2t_prob_variance'] = float(np.var(w2t_probs_array))
+            metrics[f'section_{section_idx}_w2t_count'] = int(section_w2t_counts[section_idx])
+            
+            # W2T loss metrics for this section
+            if section_w2t_losses[section_idx]:
+                w2t_losses_array = np.array(section_w2t_losses[section_idx])
+                metrics[f'section_{section_idx}_w2t_loss_mean'] = float(np.mean(w2t_losses_array))
+                metrics[f'section_{section_idx}_w2t_loss_variance'] = float(np.var(w2t_losses_array))
+            
+            # Talk position metrics for this section
+            if section_talk_probs[section_idx]:
+                talk_probs_array = np.array(section_talk_probs[section_idx])
+                metrics[f'section_{section_idx}_talk_prob_mean'] = float(np.mean(talk_probs_array))
+                metrics[f'section_{section_idx}_talk_prob_variance'] = float(np.var(talk_probs_array))
+            metrics[f'section_{section_idx}_talk_count'] = int(section_talk_counts[section_idx])
+            
+            # Talk loss metrics for this section
+            if section_talk_losses[section_idx]:
+                talk_losses_array = np.array(section_talk_losses[section_idx])
+                metrics[f'section_{section_idx}_talk_loss_mean'] = float(np.mean(talk_losses_array))
+                metrics[f'section_{section_idx}_talk_loss_variance'] = float(np.var(talk_losses_array))
+            
+            # Both position metrics for this section
+            section_both_probs = section_w2t_probs[section_idx] + section_talk_probs[section_idx]
+            if section_both_probs:
+                both_probs_array = np.array(section_both_probs)
+                metrics[f'section_{section_idx}_both_prob_mean'] = float(np.mean(both_probs_array))
+                metrics[f'section_{section_idx}_both_prob_variance'] = float(np.var(both_probs_array))
+            metrics[f'section_{section_idx}_both_count'] = int(section_w2t_counts[section_idx] + section_talk_counts[section_idx])
+            
+            # Both loss metrics for this section
+            section_both_losses = section_w2t_losses[section_idx] + section_talk_losses[section_idx]
+            if section_both_losses:
+                both_losses_array = np.array(section_both_losses)
+                metrics[f'section_{section_idx}_both_loss_mean'] = float(np.mean(both_losses_array))
+                metrics[f'section_{section_idx}_both_loss_variance'] = float(np.var(both_losses_array))
+        
+        # Log overall results
+        logger.info("=" * 70)
+        logger.info("Speaking Decision Evaluation Results (All Samples)")
+        logger.info("=" * 70)
         logger.info(f"  Total decision points: {metrics['total_decision_points']}")
         logger.info(f"  W2T positions: {total_w2t_positions}")
         logger.info(f"  Talk positions: {total_talk_positions}")
@@ -1099,14 +1307,99 @@ class SmolVLMProAssistTrainer(Trainer):
             logger.info(f"  Both Positions - W2T Prob Mean: {metrics['both_pos_prob_mean']:.4f}")
             logger.info(f"  Both Positions - W2T Prob Variance: {metrics['both_pos_prob_variance']:.4f}")
         
+        # Log top 5 most frequent target tokens at talk positions
+        if talk_target_token_counts:
+            logger.info("")
+            logger.info("Top 5 Most Frequent Target Tokens at Talk Positions:")
+            # Sort by count (descending) and get top 5
+            sorted_tokens = sorted(talk_target_token_counts.items(), key=lambda x: x[1], reverse=True)[:5]
+            for rank, (token_id, count) in enumerate(sorted_tokens, 1):
+                # Decode the token to show what it represents
+                try:
+                    token_str = self.processor.tokenizer.decode([token_id])
+                    percentage = (count / total_talk_positions) * 100
+                    logger.info(f"  {rank}. Token ID {token_id} ('{token_str}'): {count} occurrences ({percentage:.2f}%)")
+                except Exception as e:
+                    logger.info(f"  {rank}. Token ID {token_id}: {count} occurrences (failed to decode: {e})")
+        
+        # Log section-based results (samples >= 5000 tokens)
+        logger.info("=" * 70)
+        logger.info("Context Window Section Analysis (Samples >= 5000 tokens)")
+        logger.info("=" * 70)
+        for section_idx in range(NUM_SECTIONS):
+            section_start = section_idx * SECTION_SIZE
+            section_end = (section_idx + 1) * SECTION_SIZE
+            logger.info(f"\nSection {section_idx} (tokens {section_start}-{section_end}):")
+            
+            # W2T positions
+            w2t_count = metrics.get(f'section_{section_idx}_w2t_count', 0)
+            logger.info(f"  W2T positions: {w2t_count}")
+            if f'section_{section_idx}_w2t_prob_mean' in metrics:
+                logger.info(f"    Mean W2T prob: {metrics[f'section_{section_idx}_w2t_prob_mean']:.4f}")
+                logger.info(f"    Variance W2T prob: {metrics[f'section_{section_idx}_w2t_prob_variance']:.4f}")
+            if f'section_{section_idx}_w2t_loss_mean' in metrics:
+                logger.info(f"    Mean W2T loss: {metrics[f'section_{section_idx}_w2t_loss_mean']:.4f}")
+                logger.info(f"    Variance W2T loss: {metrics[f'section_{section_idx}_w2t_loss_variance']:.4f}")
+            
+            # Talk positions
+            talk_count = metrics.get(f'section_{section_idx}_talk_count', 0)
+            logger.info(f"  Talk positions: {talk_count}")
+            if f'section_{section_idx}_talk_prob_mean' in metrics:
+                logger.info(f"    Mean W2T prob: {metrics[f'section_{section_idx}_talk_prob_mean']:.4f}")
+                logger.info(f"    Variance W2T prob: {metrics[f'section_{section_idx}_talk_prob_variance']:.4f}")
+            if f'section_{section_idx}_talk_loss_mean' in metrics:
+                logger.info(f"    Mean Talk loss: {metrics[f'section_{section_idx}_talk_loss_mean']:.4f}")
+                logger.info(f"    Variance Talk loss: {metrics[f'section_{section_idx}_talk_loss_variance']:.4f}")
+            
+            # Both positions
+            both_count = metrics.get(f'section_{section_idx}_both_count', 0)
+            logger.info(f"  Both positions: {both_count}")
+            if f'section_{section_idx}_both_prob_mean' in metrics:
+                logger.info(f"    Mean W2T prob: {metrics[f'section_{section_idx}_both_prob_mean']:.4f}")
+                logger.info(f"    Variance W2T prob: {metrics[f'section_{section_idx}_both_prob_variance']:.4f}")
+            if f'section_{section_idx}_both_loss_mean' in metrics:
+                logger.info(f"    Mean Both loss: {metrics[f'section_{section_idx}_both_loss_mean']:.4f}")
+                logger.info(f"    Variance Both loss: {metrics[f'section_{section_idx}_both_loss_variance']:.4f}")
+        
+        # Log short sample analysis (< 5000 tokens) - logging only, not in metrics
+        if short_sample_count > 0:
+            logger.info("=" * 70)
+            logger.info(f"Short Sample Analysis (< 5000 tokens) - {short_sample_count} samples")
+            logger.info("=" * 70)
+            logger.info("Note: These statistics are logged for information but NOT included in recorded metrics")
+            
+            # Aggregate short sample data by section
+            agg_w2t_counts = [0] * NUM_SECTIONS
+            agg_talk_counts = [0] * NUM_SECTIONS
+            
+            for sample_length, w2t_counts, talk_counts in short_sample_sections:
+                for section_idx in range(NUM_SECTIONS):
+                    agg_w2t_counts[section_idx] += w2t_counts[section_idx]
+                    agg_talk_counts[section_idx] += talk_counts[section_idx]
+            
+            # Log aggregated short sample section data
+            for section_idx in range(NUM_SECTIONS):
+                logger.info(f"\nSection {section_idx} (proportional to sample length):")
+                logger.info(f"  W2T positions: {agg_w2t_counts[section_idx]}")
+                logger.info(f"  Talk positions: {agg_talk_counts[section_idx]}")
+                logger.info(f"  Both positions: {agg_w2t_counts[section_idx] + agg_talk_counts[section_idx]}")
+        
+        logger.info("=" * 70)
+        
         self.model.train()  # Reset to training mode
         return metrics
 
 
 def setup_model_and_processor(
-    model_args: SmolVLMModelArguments, lora_args: LoraArguments
+    model_args: SmolVLMModelArguments, lora_args: LoraArguments, checkpoint_path: Optional[str] = None
 ):
-    """Setup SmolVLM model and processor with optional LoRA."""
+    """Setup SmolVLM model and processor with optional LoRA.
+    
+    Args:
+        model_args: Model configuration arguments
+        lora_args: LoRA configuration arguments
+        checkpoint_path: Optional path to LoRA checkpoint to load
+    """
     
     logger = logging.getLogger(__name__)
 
@@ -1156,7 +1449,14 @@ def setup_model_and_processor(
         if model_args.use_qlora:
             model = prepare_model_for_kbit_training(model)
 
-        model = get_peft_model(model, lora_config)
+        # If checkpoint_path is provided, load the adapter; otherwise create a new one
+        if checkpoint_path:
+            from peft import PeftModel
+            logger.info(f"Loading LoRA adapter from checkpoint: {checkpoint_path}")
+            model = PeftModel.from_pretrained(model, checkpoint_path, is_trainable=True)
+            logger.info("LoRA adapter loaded successfully")
+        else:
+            model = get_peft_model(model, lora_config)
         
         # Enable input require grads for compatibility with gradient checkpointing
         # This is necessary when using LoRA with gradient checkpointing
@@ -1170,8 +1470,67 @@ def setup_model_and_processor(
             logger.info(
                 f"Trainable parameters: {trainable_params:,} ({trainable_params/total_params*100:.2f}%)"
             )
+    elif checkpoint_path:
+        # If checkpoint is provided but LoRA is not enabled, warn the user
+        logger.warning(
+            f"Checkpoint path provided ({checkpoint_path}) but LoRA is not enabled. "
+            "Ignoring checkpoint. Enable use_lora or use_qlora to load LoRA checkpoints."
+        )
 
     return model, processor
+
+
+def run_speaking_evaluation_only(
+    model,
+    processor,
+    eval_dataset,
+    w2t_frame_sampling_rate,
+    w2t_token_id,
+    training_args,
+    output_dir,
+):
+    """Run speaking decision evaluation on a model without training.
+    
+    Args:
+        model: The model to evaluate
+        processor: The processor for the model
+        eval_dataset: The evaluation dataset
+        w2t_frame_sampling_rate: Frame sampling rate for w2t decisions
+        w2t_token_id: Token ID for w2t predictions
+        training_args: Training arguments (for eval batch size, device, etc.)
+        output_dir: Directory to save evaluation results
+    """
+    logger = logging.getLogger(__name__)
+    logger.info("=" * 70)
+    logger.info("SPEAKING EVALUATION ONLY MODE")
+    logger.info("=" * 70)
+    
+    # Create a minimal trainer just for evaluation
+    trainer = SmolVLMProAssistTrainer(
+        processor=processor,
+        w2t_frame_sampling_rate=w2t_frame_sampling_rate,
+        w2t_token_id=w2t_token_id,
+        w2t_only=False,  # Not relevant for eval-only
+        no_assistant=False,  # Not relevant for eval-only
+        model=model,
+        args=training_args,
+        train_dataset=None,  # No training dataset needed
+        eval_dataset=eval_dataset,
+    )
+    
+    # Run speaking decision evaluation
+    logger.info("Starting speaking decision evaluation...")
+    metrics = trainer.evaluate_speaking_decisions(eval_dataset)
+    
+    logger.info("=" * 70)
+    logger.info("EVALUATION COMPLETE")
+    logger.info("=" * 70)
+    logger.info("\nSpeaking Decision Evaluation Results:")
+    for key, value in metrics.items():
+        logger.info(f"  {key}: {value}")
+    logger.info("=" * 70)
+    
+    return metrics
 
 
 def main():
@@ -1230,11 +1589,24 @@ def main():
             logger.info(f"W2T loss weight: {training_args.w2t_loss_weight}")
             logger.info(f"Assistant loss weight: {1.0 - training_args.w2t_loss_weight}")
         logger.info(f"Context size limit: {data_args.context_size_limit}")
+        logger.info(f"Speaking eval only: {training_args.speaking_eval_only}")
+        if training_args.speaking_eval_only:
+            logger.info(f"Speaking eval checkpoint: {training_args.speaking_eval_checkpoint or 'base model'}")
 
     # Setup model and processor
     logger.info("Setting up model and processor...")
     model_setup_start = time.time()
-    model, processor = setup_model_and_processor(model_args, lora_args)
+    
+    # Load checkpoint if specified for speaking eval only mode
+    checkpoint_to_load = None
+    if training_args.speaking_eval_only and training_args.speaking_eval_checkpoint:
+        checkpoint_to_load = training_args.speaking_eval_checkpoint
+        # Enable LoRA if checkpoint is provided
+        if not model_args.use_lora and not model_args.use_qlora:
+            logger.info("Enabling LoRA to load checkpoint for speaking evaluation")
+            model_args.use_lora = True
+    
+    model, processor = setup_model_and_processor(model_args, lora_args, checkpoint_to_load)
     model_setup_time = time.time() - model_setup_start
     logger.info(f"Model and processor setup took {model_setup_time:.2f}s")
     
@@ -1255,6 +1627,45 @@ def main():
     if is_global_rank_zero():
         logger.info("Loading ProAssist datasets...")
 
+    # For speaking eval only mode, we only need eval dataset
+    if training_args.speaking_eval_only:
+        if not data_args.eval_datasets:
+            raise ValueError("speaking_eval_only mode requires eval_datasets to be specified")
+        
+        logger.info("Speaking eval only mode: Loading only evaluation dataset...")
+        eval_start = time.time()
+        eval_datasets = build_eval_datasets(**all_args_dict)
+        eval_dataset_time = time.time() - eval_start
+        logger.info(f"Loading eval dataset took {eval_dataset_time:.2f}s")
+        
+        eval_dataset = list(eval_datasets.values())[0]  # Use first eval dataset
+        logger.info("Initializing SmolVLM eval dataset...")
+        smolvlm_eval_dataset = ProAssistSmolVLMDataset(
+            eval_dataset,
+            processor,
+            use_4_1_aspect_ratio=data_args.use_4_1_aspect_ratio,
+            frame_sampling_ratio=data_args.frame_sampling_ratio,
+            context_size_limit=data_args.context_size_limit,
+        )
+        
+        # Determine W2T token ID
+        w2t_token_id = END_OF_UTTERANCE_TOKEN_ID if data_args.use_end_of_utterance_for_w2t else W2T_TOKEN_ID
+        
+        # Run evaluation and exit
+        run_speaking_evaluation_only(
+            model=model,
+            processor=processor,
+            eval_dataset=smolvlm_eval_dataset,
+            w2t_frame_sampling_rate=data_args.w2t_frame_sampling_rate,
+            w2t_token_id=w2t_token_id,
+            training_args=training_args,
+            output_dir=training_args.output_dir,
+        )
+        
+        logger.info("Speaking evaluation complete. Exiting.")
+        return
+
+    # Normal training mode: load both train and eval datasets
     dataset_start = time.time()
     train_dataset = build_train_dataset(**all_args_dict)
     train_dataset_time = time.time() - dataset_start
@@ -1361,6 +1772,11 @@ def main():
     training_start_time = time.time()
     trainer.train()
     training_total_time = time.time() - training_start_time
+    
+    # Stop profiler if enabled
+    if trainer.profiler is not None:
+        trainer.profiler.stop()
+        logger.info("PyTorch Profiler stopped. Results saved to TensorBoard.")
     
     if is_global_rank_zero():
         logger.info(f"Training completed in {training_total_time:.2f}s ({training_total_time/3600:.2f}h)")

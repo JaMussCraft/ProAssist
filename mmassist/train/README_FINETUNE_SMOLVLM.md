@@ -203,9 +203,26 @@ python finetune_smolvlm.py \
     --use_end_of_utterance_for_w2t true
 ```
 
+## Evaluating Speaking Decisions (Eval-Only Mode)
+
+Run speaking decision evaluation on a checkpoint without training:
+
+**Evaluate a trained checkpoint:**
+```bash
+python finetune_smolvlm.py \
+    --speaking_eval_only \
+    --speaking_eval_checkpoint ./my_adapter/checkpoint-1000 \
+    --use_lora \
+    --eval_datasets wtag/dialog-klg-sum_val_L2048_I1 \
+    --data_root_dir /path/to/processed_data/ \
+    --output_dir ./eval_results_checkpoint \
+    --per_device_eval_batch_size 8
+```
+
 ## Tips
 
 1. **Monitoring training:** Use TensorBoard with `tensorboard --logdir ./my_adapter/runs`
+2. **Evaluate checkpoints:** Use `--speaking_eval_only` to compare checkpoint performance
 
 
 ## See Also
