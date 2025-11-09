@@ -53,6 +53,11 @@ class ProAssistSmolVLMDataset:
             self.max_images_per_sample = 22
             self.logger.warning(f"Unknown model '{self.model_name}', defaulting to 320 tokens per image and 22 max images")
         
+        # Adjust tokens per image and max images if not using 4:1 aspect ratio
+        if not self.use_4_1_aspect_ratio:
+            self.tokens_per_image = int(self.tokens_per_image * 3.4)
+            self.max_images_per_sample = int(self.max_images_per_sample / 3.4)
+        
         self.logger.info(f"Using {self.tokens_per_image} tokens per image and max {self.max_images_per_sample} images per sample for model: {self.model_name}")
 
         # Generate cache file path based on dataset and parameters

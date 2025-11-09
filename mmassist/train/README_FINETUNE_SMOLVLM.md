@@ -55,6 +55,9 @@ python finetune_smolvlm.py \
 - `--use_end_of_utterance_for_w2t`: Use end-of-utterance token for speaking decisions
 - `--w2t_only`: Only compute loss for speaking decision tokens
 - `--no_assistant`: Disable learning from assistant response tokens
+- `--focal_loss`: Enable focal loss for hard example focus
+- `--focal_loss_gamma`: Focal loss gamma parameter (default: 2.0)
+- `--image_attention_bias`: Positive attention bias for image tokens (default: 0.0, typical: 0.5-2.0)
 
 **LoRA Configuration:**
 - `--lora_r`: LoRA rank (default: 16, increase if underfitting)
@@ -80,11 +83,11 @@ After training, the output directory contains:
 
 ```python
 from peft import PeftModel
-from transformers import AutoProcessor, Idefics3ForConditionalGeneration
+from transformers import AutoProcessor, AutoModelForImageTextToText
 import torch
 
 # Load base model
-base_model = Idefics3ForConditionalGeneration.from_pretrained(
+base_model = AutoModelForImageTextToText.from_pretrained(
     "HuggingFaceTB/SmolVLM2-2.2B-Instruct",
     torch_dtype=torch.bfloat16,
     device_map="auto"
@@ -152,7 +155,7 @@ python combine_lora_adapters.py \
 from peft import PeftModel
 
 # Load base model
-base_model = Idefics3ForConditionalGeneration.from_pretrained(
+base_model = AutoModelForImageTextToText.from_pretrained(
     "HuggingFaceTB/SmolVLM2-2.2B-Instruct",
     torch_dtype=torch.bfloat16,
     device_map="auto"
@@ -218,6 +221,31 @@ python finetune_smolvlm.py \
     --output_dir ./eval_results_checkpoint \
     --per_device_eval_batch_size 8
 ```
+
+## Advanced Features
+
+### Image Attention Bias
+
+Encourage the model to attend more to image tokens during training by adding a positive attention bias:
+
+```bash
+python finetune_smolvlm.py \
+    --image_attention_bias 1.0 \
+    --train_datasets wtag/dialog-klg-sum_train_L2048_I1 \
+    --output_dir ./image_focused_adapter \
+    ...
+```
+
+**How it works:**
+- Adds a positive bias to attention weights for image token positions (IDs 49152-49190)
+- Applied before softmax in the attention mechanism
+- Only active during training, not inference
+- Helps produce more visually-grounded responses by reducing over-reliance on text tokens
+
+**Typical values:**
+- `0.0` (default): Disabled
+- `0.5-1.0`: Moderate bias, good starting point
+- `1.0-2.0`: Stronger bias for highly visual tasks
 
 ## Tips
 

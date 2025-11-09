@@ -27,7 +27,7 @@ import torch
 from typing import List, Optional
 from collections import OrderedDict
 from peft import PeftModel
-from transformers import AutoProcessor, Idefics3ForConditionalGeneration
+from transformers import AutoProcessor, AutoModelForImageTextToText
 
 
 def load_adapter_metadata(adapter_path: str) -> dict:
@@ -52,7 +52,7 @@ def weighted_average_adapters(
     This method manually combines the adapter weights using weighted averaging.
     """
     print(f"Loading base model from {base_model_path}...")
-    base_model = Idefics3ForConditionalGeneration.from_pretrained(
+    base_model = AutoModelForImageTextToText.from_pretrained(
         base_model_path,
         torch_dtype=torch.bfloat16,
         device_map="auto",
@@ -131,7 +131,7 @@ def create_multi_adapter_model(
     This doesn't merge the adapters but allows runtime switching.
     """
     print(f"Loading base model from {base_model_path}...")
-    base_model = Idefics3ForConditionalGeneration.from_pretrained(
+    base_model = AutoModelForImageTextToText.from_pretrained(
         base_model_path,
         torch_dtype=torch.bfloat16,
         device_map="auto",

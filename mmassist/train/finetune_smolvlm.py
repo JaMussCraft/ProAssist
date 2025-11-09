@@ -3,6 +3,15 @@ Fine-tune SmolVLM-Instruct on ProAssist dataset for streaming video assistance.
 
 This script adapts the SmolVLM fine-tuning approach to work with ProAssist's
 multi-modal conversation format with temporal video frames.
+
+Features:
+- LoRA/QLoRA fine-tuning support
+- Custom loss weighting for speaking decisions and assistant responses
+- Visual attention bias for improved visual grounding (experimental)
+- Multi-dataset evaluation and speaking decision metrics
+- Early stopping and checkpoint management
+
+See README_FINETUNE_SMOLVLM.md for usage documentation.
 """
 
 import os
@@ -18,10 +27,11 @@ from typing import Dict, List, Optional, Union, Literal, Tuple
 import transformers
 from transformers import (
     AutoProcessor,
-    Idefics3ForConditionalGeneration,
+    AutoModelForImageTextToText,
     TrainingArguments,
     Trainer,
     HfArgumentParser,
+    SmolVLMForConditionalGeneration, LlamaModel
 )
 from peft import LoraConfig, prepare_model_for_kbit_training, get_peft_model
 from transformers import BitsAndBytesConfig
@@ -41,6 +51,136 @@ END_OF_UTTERANCE_TOKEN_ID = 49279  # <end_of_utterance>
 FAKE_TOKEN_AROUND_IMAGE_ID = 49189  # <fake_token_around_image>
 IMAGE_TOKEN_ID = 49190  # <image>
 GLOBAL_IMG_TOKEN_ID = 49152  # <global-img>
+
+# Image token IDs - these are all the special tokens representing visual information
+# Range: 49152 (<global-img>) to 49190 (<image>)
+IMAGE_TOKEN_IDS = set(range(49152, 49191))  # 49152-49190 inclusive
+
+def apply_image_token_attention_bias(attn_weights, key_input_ids, bias_value=0.0):
+    """
+    Apply positive attention bias to image tokens in the key positions.
+    
+    Args:
+        attn_weights: Attention weights tensor of shape [batch, num_heads, seq_len_q, seq_len_k]
+        key_input_ids: Input IDs for the keys (shape: [batch, seq_len_k])
+        bias_value: Positive bias value to add to image token positions
+    
+    Returns:
+        Modified attention weights with bias applied to image token positions
+    """
+    if bias_value == 0.0:
+        return attn_weights
+    
+    # Create a mask for image tokens in the key positions
+    # key_input_ids shape: [batch, seq_len_k]
+    # We need to expand this to match attn_weights shape: [batch, num_heads, seq_len_q, seq_len_k]
+    
+    # Check which tokens are image tokens
+    image_token_mask = torch.zeros_like(key_input_ids, dtype=torch.bool)
+    for token_id in IMAGE_TOKEN_IDS:
+        image_token_mask = image_token_mask | (key_input_ids == token_id)
+    
+    # Expand mask to match attention weights shape
+    # [batch, seq_len_k] -> [batch, 1, 1, seq_len_k]
+    image_token_mask = image_token_mask.unsqueeze(1).unsqueeze(1)
+    
+    # Create bias tensor (positive values for image tokens, 0 elsewhere)
+    bias = torch.where(image_token_mask, 
+                       torch.tensor(bias_value, dtype=attn_weights.dtype, device=attn_weights.device),
+                       torch.tensor(0.0, dtype=attn_weights.dtype, device=attn_weights.device))
+    
+    # Add bias to attention weights (before softmax)
+    attn_weights = attn_weights + bias
+    
+    return attn_weights
+
+def patch_llama_attention_for_image_bias(input_ids, bias_value, logger=None):
+    """
+    Monkey-patch LlamaModel's eager attention to add image token bias during training.
+    
+    Args:
+        input_ids: Input token IDs to use for identifying image tokens
+        bias_value: Positive bias value to add to image token positions
+        logger: Logger instance for debug output
+    """
+    from transformers.models.llama import modeling_llama
+    from transformers.models.llama.modeling_llama import repeat_kv
+    
+    # Store original eager_attention_forward if not already stored
+    if not hasattr(patch_llama_attention_for_image_bias, '_original_eager_attention'):
+        patch_llama_attention_for_image_bias._original_eager_attention = modeling_llama.eager_attention_forward
+        if logger:
+            logger.info("🔧 Patching LlamaModel eager_attention_forward for image token bias")
+        
+    def custom_eager_attention_forward(
+        module,
+        query,
+        key,
+        value,
+        attention_mask,
+        scaling,
+        dropout=0.0,
+        **kwargs,
+    ):
+        # Log first call
+        if not hasattr(custom_eager_attention_forward, '_first_call_logged'):
+            custom_eager_attention_forward._first_call_logged = True
+            if logger:
+                logger.info("✓ Custom eager_attention_forward called (image bias active)")
+        
+        # Replicate original implementation with image bias injection
+        # This follows the exact implementation from modeling_llama.py
+        
+        # Repeat key/value for grouped-query attention (GQA)
+        key_states = repeat_kv(key, module.num_key_value_groups)
+        value_states = repeat_kv(value, module.num_key_value_groups)
+        
+        # Compute attention weights
+        attn_weights = torch.matmul(query, key_states.transpose(2, 3)) * scaling
+        
+        # Apply image token attention bias if enabled (BEFORE attention mask and softmax)
+        if bias_value != 0.0 and module.training:
+            # Compute mean before bias
+            mean_before = attn_weights.mean().item()
+            
+            # Apply bias
+            attn_weights = apply_image_token_attention_bias(attn_weights, input_ids, bias_value)
+            
+            # Compute mean after bias and log occasionally
+            mean_after = attn_weights.mean().item()
+            if not hasattr(custom_eager_attention_forward, '_bias_log_count'):
+                custom_eager_attention_forward._bias_log_count = 0
+            
+            custom_eager_attention_forward._bias_log_count += 1
+            # Log every 1000 attention calls (not steps - there are many attention layers per step)
+            if custom_eager_attention_forward._bias_log_count % 1000 == 0 and logger:
+                logger.info(f"  Attention weights: mean before bias={mean_before:.6f}, after bias={mean_after:.6f}, delta={mean_after-mean_before:.6f}")
+        
+        # Apply causal mask (slice to key length)
+        if attention_mask is not None:
+            causal_mask = attention_mask[:, :, :, : key_states.shape[-2]]
+            attn_weights = attn_weights + causal_mask
+        
+        # Softmax and dropout
+        attn_weights = torch.nn.functional.softmax(attn_weights, dim=-1, dtype=torch.float32).to(query.dtype)
+        attn_weights = torch.nn.functional.dropout(attn_weights, p=dropout, training=module.training)
+        
+        # Compute output
+        attn_output = torch.matmul(attn_weights, value_states)
+        
+        # Transpose back to expected dimension order
+        attn_output = attn_output.transpose(1, 2).contiguous()
+        
+        # Return tuple matching original signature
+        return attn_output, attn_weights
+    
+    modeling_llama.eager_attention_forward = custom_eager_attention_forward
+
+def unpatch_llama_attention():
+    """Restore original LlamaModel attention implementation."""
+    if hasattr(patch_llama_attention_for_image_bias, '_original_eager_attention'):
+        from transformers.models.llama import modeling_llama
+        modeling_llama.eager_attention_forward = patch_llama_attention_for_image_bias._original_eager_attention
 
 def log_memory_usage(stage="", logger=None):
     """Log current system memory usage."""
@@ -256,6 +396,8 @@ class SmolVLMTrainingArguments(TrainingArguments):
     dataloader_prefetch_factor: Optional[int] = field(default=None, metadata={"help": "Number of batches loaded in advance by each worker. None means 2 if num_workers > 0."})
     w2t_loss_weight: float = field(default=0.5, metadata={"help": "Weight for w2t loss (0.0-1.0). Assistant loss weight is inferred as 1 - w2t_loss_weight. Mutually exclusive with use_inverse_freq_weighting."})
     use_inverse_freq_weighting: bool = field(default=False, metadata={"help": "If True, use inverse frequency weighting per batch for label types. Mutually exclusive with w2t_loss_weight (which should be set to 0.5 when this is enabled)."})
+    focal_loss: bool = field(default=False, metadata={"help": "If True, use focal loss to address class difficulty imbalance by applying (1-p_true)^gamma modulation factor."})
+    focal_loss_gamma: float = field(default=2.0, metadata={"help": "Gamma parameter for focal loss. Higher gamma increases focus on hard examples. Typical values: 0.5-5.0. Only used if focal_loss=True."})
     early_stopping: bool = field(default=False, metadata={"help": "If True, stop training after eval loss starts increasing and checkpoint is saved. Allows verification of the checkpoint before stopping completely."})
     speaking_eval_only: bool = field(default=False, metadata={"help": "If True, skip training and only run speaking decision evaluation on the specified model."})
     speaking_eval_checkpoint: Optional[str] = field(default=None, metadata={"help": "Path to LoRA adapter checkpoint for speaking evaluation. If None, uses base model."})
@@ -264,6 +406,7 @@ class SmolVLMTrainingArguments(TrainingArguments):
     profiler_schedule_warmup: int = field(default=1, metadata={"help": "Number of steps for profiler warmup."})
     profiler_schedule_active: int = field(default=5, metadata={"help": "Number of steps to actively profile."})
     profiler_schedule_repeat: int = field(default=5, metadata={"help": "Number of times to repeat the profiling cycle."})
+    image_attention_bias: float = field(default=0.0, metadata={"help": "Positive attention bias for image tokens (0.0 = disabled, typical values: 0.5-2.0). Encourages model to attend more to past image tokens during training."})
 
 
 @dataclass
@@ -537,6 +680,21 @@ class SmolVLMProAssistTrainer(Trainer):
         self.eval_loss_increased = False
         self.checkpoint_saved_after_increase = False
         
+        # Store image attention bias value
+        self.image_attention_bias = self.args.image_attention_bias
+        self.image_bias_patched = False  # Track if patching has been applied
+        
+        if self.image_attention_bias != 0.0:
+            self.logger.info("=" * 70)
+            self.logger.info("Image Token Attention Bias ENABLED")
+            self.logger.info("=" * 70)
+            self.logger.info(f"  Bias value: {self.image_attention_bias}")
+            self.logger.info(f"  Image-related token IDs: {min(IMAGE_TOKEN_IDS)} to {max(IMAGE_TOKEN_IDS)}")
+            self.logger.info(f"  Total image token types: {len(IMAGE_TOKEN_IDS)}")
+            self.logger.info("  Note: Bias only applied during training, not inference")
+            self.logger.info("  Patching will be applied on first forward pass")
+            self.logger.info("=" * 70)
+        
         # Setup PyTorch profiler if enabled
         self.profiler = None
         if self.args.use_profiler:
@@ -578,6 +736,11 @@ class SmolVLMProAssistTrainer(Trainer):
         1. Fixed weights: w2t_loss_weight and (1 - w2t_loss_weight) for assistant
         2. Inverse frequency weighting: dynamically computed per batch based on token counts
         
+        Optional focal loss modulation:
+        - When focal_loss=True, applies (1-p_true)^gamma factor to focus on hard examples
+        - The gamma parameter controls how much to down-weight easy examples
+        - Works in combination with either weighting strategy above
+        
         This implementation replicates HuggingFace Trainer's default causal LM loss
         computation but adds custom weighting based on label types.
         """
@@ -587,6 +750,24 @@ class SmolVLMProAssistTrainer(Trainer):
                 "use_inverse_freq_weighting and w2t_loss_weight are mutually exclusive. "
                 "When using inverse frequency weighting, w2t_loss_weight should be set to 0.5 (default)."
             )
+        
+        # Apply image attention bias patching if enabled (only once)
+        if self.image_attention_bias != 0.0 and model.training and not self.image_bias_patched:
+            input_ids = inputs.get("input_ids")
+            if input_ids is not None:
+                self.logger.info(f"Applying image attention bias patching (bias={self.image_attention_bias})...")
+                patch_llama_attention_for_image_bias(input_ids, self.image_attention_bias, self.logger)
+                self.image_bias_patched = True
+                self.logger.info("Image attention bias patching complete. Will be active for all subsequent forward passes.")
+        
+        # Log image token statistics every 100 steps (if bias is enabled)
+        if self.image_attention_bias != 0.0 and self.step_count % 100 == 0 and model.training:
+            input_ids = inputs.get("input_ids")
+            if input_ids is not None:
+                num_image_tokens = sum((input_ids == token_id).sum().item() for token_id in IMAGE_TOKEN_IDS)
+                total_tokens = (input_ids != self.processor.tokenizer.pad_token_id).sum().item()
+                image_token_pct = (num_image_tokens / total_tokens * 100) if total_tokens > 0 else 0
+                self.logger.info(f"Image attention bias active (bias={self.image_attention_bias}): {num_image_tokens}/{total_tokens} tokens are image-related tokens ({image_token_pct:.2f}%)")
         
         # Extract label_types if present
         label_types = inputs.pop("label_types", None)
@@ -626,6 +807,30 @@ class SmolVLMProAssistTrainer(Trainer):
         # Compute per-token loss
         per_token_loss = loss_fct(shift_logits_flat, shift_labels_flat)
         per_token_loss = per_token_loss.view(shift_labels.size())
+        
+        # Apply focal loss modulation if enabled
+        focal_weight = None
+        if self.args.focal_loss:
+            # Get probabilities for the true class
+            # shift_logits shape: (batch_size, seq_len-1, vocab_size)
+            probs = torch.softmax(shift_logits, dim=-1)
+
+            # Clamp labels to valid range to avoid gather errors with -100
+            # We'll mask these out later anyway, so the exact value doesn't matter
+            valid_labels = shift_labels.clamp(min=0)
+            
+            # Gather probabilities for the true labels
+            # shift_labels shape: (batch_size, seq_len-1)
+            # We need to gather along the vocab dimension
+            p_true = torch.gather(probs, dim=-1, index=valid_labels.unsqueeze(-1)).squeeze(-1)
+            
+            # Compute focal loss modulation factor: (1 - p_true)^gamma
+            # For ignored tokens (label=-100), p_true will be near 0, so (1-p_true) will be near 1
+            # This is fine since we'll mask these out anyway
+            focal_weight = torch.pow(1.0 - p_true, self.args.focal_loss_gamma)
+            
+            # Apply focal loss modulation
+            per_token_loss = per_token_loss * focal_weight
         
         # Create mask for valid (non-ignored) tokens
         mask = (shift_labels != -100).float()
@@ -732,6 +937,44 @@ class SmolVLMProAssistTrainer(Trainer):
                 self.logger.info(f"  Assistant weight: {assistant_weight:.2f}")
                 self.logger.info(f"  W2T weight: {w2t_weight:.2f}")
                 self.logger.info(f"  Talk weight: {talk_weight:.2f}")
+                
+                # Log focal loss modulation statistics if enabled
+                if self.args.focal_loss and focal_weight is not None:
+                    self.logger.info(f"Focal loss modulation (gamma={self.args.focal_loss_gamma}):")
+                    
+                    # Compute average focal weight for each label type
+                    assistant_focal_weights = focal_weight[assistant_mask > 0]
+                    w2t_focal_weights = focal_weight[w2t_mask > 0]
+                    talk_focal_weights = focal_weight[talk_mask > 0]
+                    
+                    if len(assistant_focal_weights) > 0:
+                        avg_assistant_focal = assistant_focal_weights.mean().item()
+                        self.logger.info(f"  Assistant avg focal weight: {avg_assistant_focal:.4f}")
+                    
+                    if len(w2t_focal_weights) > 0:
+                        avg_w2t_focal = w2t_focal_weights.mean().item()
+                        self.logger.info(f"  W2T avg focal weight: {avg_w2t_focal:.4f}")
+                    
+                    if len(talk_focal_weights) > 0:
+                        avg_talk_focal = talk_focal_weights.mean().item()
+                        self.logger.info(f"  Talk avg focal weight: {avg_talk_focal:.4f}")
+                    
+                    # Also compute average p_true for each type to understand the focal weights
+                    if len(assistant_focal_weights) > 0:
+                        assistant_p_true = p_true[assistant_mask > 0]
+                        avg_assistant_p_true = assistant_p_true.mean().item()
+                        self.logger.info(f"  Assistant avg p_true: {avg_assistant_p_true:.4f} (higher = more confident)")
+                    
+                    if len(w2t_focal_weights) > 0:
+                        w2t_p_true = p_true[w2t_mask > 0]
+                        avg_w2t_p_true = w2t_p_true.mean().item()
+                        self.logger.info(f"  W2T avg p_true: {avg_w2t_p_true:.4f} (higher = more confident)")
+                    
+                    if len(talk_focal_weights) > 0:
+                        talk_p_true = p_true[talk_mask > 0]
+                        avg_talk_p_true = talk_p_true.mean().item()
+                        self.logger.info(f"  Talk avg p_true: {avg_talk_p_true:.4f} (higher = more confident)")
+                
                 if baseline_loss is not None:
                     self.logger.info(f"HuggingFace baseline loss: {baseline_loss:.6f}")
                     loss_diff = abs(unweighted_loss.item() - baseline_loss)
@@ -924,8 +1167,8 @@ class SmolVLMProAssistTrainer(Trainer):
         Override checkpoint saving to implement early stopping after save.
         This ensures we have the checkpoint available before stopping.
         """
-        # Call parent's save checkpoint
-        checkpoint_folder = super()._save_checkpoint(model, trial, metrics)
+        # Call parent's save checkpoint - only pass model and trial
+        checkpoint_folder = super()._save_checkpoint(model, trial)
         
         # Check if we should stop training after this checkpoint
         if self.args.early_stopping and self.eval_loss_increased:
@@ -1025,9 +1268,15 @@ class SmolVLMProAssistTrainer(Trainer):
         
         return metrics
 
-    def evaluate_speaking_decisions(self, eval_dataset=None):
+    def evaluate_speaking_decisions(self, eval_dataset=None, test_datasets=None):
         """
         Evaluate w2t probability statistics at speaking decision positions.
+        
+        Args:
+            eval_dataset: Single evaluation dataset (legacy support)
+            test_datasets: List of test dataset names to evaluate on. If provided, will compute
+                          score across multiple test datasets: wtag, ego4d, egoexolearn, epickitchens.
+                          Format: ["wtag/dialog-klg-sum_test_L2048_I1", "ego4d/dialog-klg-sum_test_L2048_I1", ...]
         
         Returns:
             dict: Evaluation metrics including w2t probability mean/variance for:
@@ -1035,9 +1284,140 @@ class SmolVLMProAssistTrainer(Trainer):
                   - talk positions (positive frames)
                   - both positions combined
                   - trends across context window sections (5 sections of 1500 tokens each)
+                  - overall_score: Average score (0-100) based on W2T probability distance from ground truth
         """
         import torch.nn.functional as F
         
+        # If test_datasets provided, evaluate across multiple datasets
+        if test_datasets is not None:
+            logger = logging.getLogger(__name__)
+            logger.info("=" * 70)
+            logger.info("Multi-Dataset Speaking Decision Evaluation")
+            logger.info("=" * 70)
+            logger.info(f"Evaluating on {len(test_datasets)} test datasets:")
+            for dataset_name in test_datasets:
+                logger.info(f"  - {dataset_name}")
+            logger.info("=" * 70)
+            
+            # Import dataset building functions
+            from mmassist.data import build_eval_datasets
+            from mmassist.data.build import get_dataset_shortname
+            from mmassist.train.proassist_smolvlm_dataset import ProAssistSmolVLMDataset
+            
+            # Aggregate scores across all datasets
+            all_dataset_scores = []
+            dataset_metrics = {}
+            
+            for dataset_name in test_datasets:
+                logger.info(f"\nEvaluating on dataset: {dataset_name}")
+                logger.info("-" * 70)
+                
+                # Build dataset
+                dataset_args = {
+                    "data_root_dir": self.args.data_root_dir if hasattr(self.args, 'data_root_dir') else "/projects/beto/swong2/proassist_data/processed_data",
+                    "eval_datasets": dataset_name,
+                    "print_info": False,
+                    "keep_images": True,
+                    "remove_summarize_turns": False,
+                }
+                
+                try:
+                    test_datasets_dict = build_eval_datasets(**dataset_args)
+                    
+                    if not test_datasets_dict:
+                        logger.warning(f"Failed to load dataset: {dataset_name}")
+                        continue
+                    
+                    # Get the shortname key that build_eval_datasets uses
+                    dataset_key = get_dataset_shortname(dataset_name)
+                    
+                    # Try to find the dataset in the returned dict
+                    test_dataset = None
+                    if dataset_key in test_datasets_dict:
+                        test_dataset = test_datasets_dict[dataset_key]
+                    elif dataset_name in test_datasets_dict:
+                        test_dataset = test_datasets_dict[dataset_name]
+                    elif len(test_datasets_dict) == 1:
+                        # Use first dataset if only one is returned
+                        test_dataset = list(test_datasets_dict.values())[0]
+                    
+                    if test_dataset is None:
+                        logger.warning(f"Failed to load dataset: {dataset_name}")
+                        continue
+                        
+                except Exception as e:
+                    logger.warning(f"Error loading dataset {dataset_name}: {e}")
+                    continue
+                
+                # Convert to SmolVLM format
+                try:
+                    smolvlm_test_dataset = ProAssistSmolVLMDataset(
+                        test_dataset,
+                        self.processor,
+                        use_4_1_aspect_ratio=True,
+                        frame_sampling_ratio=0.1,
+                        context_size_limit=7500,
+                    )
+                except Exception as e:
+                    logger.warning(f"Error converting dataset {dataset_name}: {e}")
+                    continue
+                
+                # Evaluate on this dataset (recursive call with single dataset)
+                try:
+                    dataset_result = self.evaluate_speaking_decisions(eval_dataset=smolvlm_test_dataset, test_datasets=None)
+                except Exception as e:
+                    logger.warning(f"Error evaluating dataset {dataset_name}: {e}")
+                    continue
+                
+                # Store results using the dataset source name (e.g., "wtag", "ego4d", etc.)
+                dataset_source = dataset_name.split('/')[0]
+                dataset_metrics[dataset_source] = dataset_result
+                
+                if 'overall_score' in dataset_result:
+                    all_dataset_scores.append(dataset_result['overall_score'])
+                
+                logger.info(f"{dataset_source}: {dataset_result.get('overall_score', 0.0):.2f}/100")
+                
+                # Clean up memory between datasets to prevent accumulation
+                force_cleanup()
+                log_memory_usage(f"After evaluating {dataset_source}", logger)
+            
+            # Compute overall score across all datasets
+            if all_dataset_scores:
+                overall_multi_dataset_score = float(np.mean(all_dataset_scores))
+                
+                logger.info("=" * 70)
+                logger.info("Multi-Dataset Evaluation Summary")
+                logger.info("=" * 70)
+                logger.info(f"  Overall Score (average across {len(all_dataset_scores)} datasets): {overall_multi_dataset_score:.2f}/100")
+                logger.info("")
+                logger.info("  Per-dataset scores:")
+                for dataset_name in test_datasets:
+                    dataset_key = dataset_name.split('/')[0]
+                    if dataset_key in dataset_metrics:
+                        score = dataset_metrics[dataset_key].get('overall_score', 0.0)
+                        logger.info(f"    {dataset_key}: {score:.2f}/100")
+                logger.info("=" * 70)
+                
+                # Return aggregated metrics
+                aggregated_metrics = {
+                    'overall_score': overall_multi_dataset_score,
+                    'num_datasets': len(all_dataset_scores),
+                    'dataset_scores': {dataset_name.split('/')[0]: dataset_metrics[dataset_name.split('/')[0]].get('overall_score', 0.0) 
+                                      for dataset_name in test_datasets if dataset_name.split('/')[0] in dataset_metrics},
+                }
+                
+                # Include per-dataset detailed metrics
+                for dataset_key, metrics_dict in dataset_metrics.items():
+                    for key, value in metrics_dict.items():
+                        aggregated_metrics[f'{dataset_key}_{key}'] = value
+                
+                return aggregated_metrics
+            else:
+                logger.warning("No datasets successfully evaluated")
+                return {}
+        
+        # Single dataset evaluation (legacy path)
         if eval_dataset is None:
             eval_dataset = self.eval_dataset
             
@@ -1053,6 +1433,9 @@ class SmolVLMProAssistTrainer(Trainer):
         talk_position_probs = []  # W2T probabilities at talk positions
         total_w2t_positions = 0
         total_talk_positions = 0
+        
+        # For score computation: track individual scores at each decision point
+        decision_point_scores = []  # List of scores (0-100) for each decision point
         
         # Track metrics by context window section (5 sections of 1500 tokens each)
         NUM_SECTIONS = 5
@@ -1155,9 +1538,15 @@ class SmolVLMProAssistTrainer(Trainer):
                                 if label_type == 'w2t':
                                     w2t_position_probs.append(w2t_prob)
                                     total_w2t_positions += 1
+                                    # Score for negative frame: w2t_prob * 100 (higher w2t_prob = better)
+                                    score = w2t_prob * 100.0
+                                    decision_point_scores.append(score)
                                 else:  # 'talk'
                                     talk_position_probs.append(w2t_prob)
                                     total_talk_positions += 1
+                                    # Score for positive frame: (1 - w2t_prob) * 100 (lower w2t_prob = better)
+                                    score = (1.0 - w2t_prob) * 100.0
+                                    decision_point_scores.append(score)
                                     
                                     # Track target token counts for talk positions
                                     talk_target_token_counts[target_token_id] = talk_target_token_counts.get(target_token_id, 0) + 1
@@ -1221,6 +1610,13 @@ class SmolVLMProAssistTrainer(Trainer):
             'total_talk_positions': int(total_talk_positions),
             'total_decision_points': int(total_w2t_positions + total_talk_positions),
         }
+        
+        # Calculate overall score (0-100) based on W2T probability distance from ground truth
+        if decision_point_scores:
+            overall_score = float(np.mean(decision_point_scores))
+            metrics['overall_score'] = overall_score
+        else:
+            metrics['overall_score'] = 0.0
         
         # Statistics for w2t positions (negative frames - should have high w2t prob)
         if w2t_position_probs:
@@ -1291,6 +1687,7 @@ class SmolVLMProAssistTrainer(Trainer):
         logger.info("=" * 70)
         logger.info("Speaking Decision Evaluation Results (All Samples)")
         logger.info("=" * 70)
+        logger.info(f"  Overall Score: {metrics['overall_score']:.2f}/100")
         logger.info(f"  Total decision points: {metrics['total_decision_points']}")
         logger.info(f"  W2T positions: {total_w2t_positions}")
         logger.info(f"  Talk positions: {total_talk_positions}")
@@ -1391,7 +1788,8 @@ class SmolVLMProAssistTrainer(Trainer):
 
 
 def setup_model_and_processor(
-    model_args: SmolVLMModelArguments, lora_args: LoraArguments, checkpoint_path: Optional[str] = None
+    model_args: SmolVLMModelArguments, lora_args: LoraArguments, checkpoint_path: Optional[str] = None, 
+    force_eager_attention: bool = False
 ):
     """Setup SmolVLM model and processor with optional LoRA.
     
@@ -1399,6 +1797,7 @@ def setup_model_and_processor(
         model_args: Model configuration arguments
         lora_args: LoRA configuration arguments
         checkpoint_path: Optional path to LoRA checkpoint to load
+        force_eager_attention: If True, force model to use eager attention implementation
     """
     
     logger = logging.getLogger(__name__)
@@ -1416,13 +1815,22 @@ def setup_model_and_processor(
             bnb_4bit_compute_dtype=torch.bfloat16,
         )
 
-    # Load model
-    model = Idefics3ForConditionalGeneration.from_pretrained(
+    # Load model with optional eager attention
+    model_kwargs = {
+        "quantization_config": quantization_config,
+        "torch_dtype": torch.bfloat16,
+        "device_map": "auto",
+        "trust_remote_code": True,
+    }
+    
+    # Force eager attention if requested (needed for image attention bias)
+    if force_eager_attention:
+        model_kwargs["attn_implementation"] = "eager"
+        logger.info("Forcing model to use EAGER attention implementation (required for image attention bias)")
+    
+    model = AutoModelForImageTextToText.from_pretrained(
         model_args.model_name_or_path,
-        quantization_config=quantization_config,
-        torch_dtype=torch.bfloat16,
-        device_map="auto",
-        trust_remote_code=True,
+        **model_kwargs
     )
 
     # Freeze vision encoder if requested
@@ -1488,22 +1896,32 @@ def run_speaking_evaluation_only(
     w2t_token_id,
     training_args,
     output_dir,
+    data_root_dir=None,
 ):
     """Run speaking decision evaluation on a model without training.
     
     Args:
         model: The model to evaluate
         processor: The processor for the model
-        eval_dataset: The evaluation dataset
+        eval_dataset: The evaluation dataset (can be None if using multi-dataset eval)
         w2t_frame_sampling_rate: Frame sampling rate for w2t decisions
         w2t_token_id: Token ID for w2t predictions
         training_args: Training arguments (for eval batch size, device, etc.)
         output_dir: Directory to save evaluation results
+        data_root_dir: Root directory for ProAssist data (for multi-dataset eval)
     """
     logger = logging.getLogger(__name__)
     logger.info("=" * 70)
     logger.info("SPEAKING EVALUATION ONLY MODE")
     logger.info("=" * 70)
+    
+    # Define the 4 test datasets
+    test_datasets = [
+        "wtag/dialog-klg-sum_test_L2048_I1", # TEMP
+        "ego4d/dialog-klg-sum_test_L2048_I1",
+        "egoexolearn/dialog-klg-sum_test_L2048_I1",
+        "epickitchens/dialog-klg-sum_test_L2048_I1",
+    ]
     
     # Create a minimal trainer just for evaluation
     trainer = SmolVLMProAssistTrainer(
@@ -1518,9 +1936,13 @@ def run_speaking_evaluation_only(
         eval_dataset=eval_dataset,
     )
     
-    # Run speaking decision evaluation
-    logger.info("Starting speaking decision evaluation...")
-    metrics = trainer.evaluate_speaking_decisions(eval_dataset)
+    # Add data_root_dir to trainer args if provided
+    if data_root_dir:
+        trainer.args.data_root_dir = data_root_dir
+    
+    # Run speaking decision evaluation on all 4 test datasets
+    logger.info("Starting speaking decision evaluation on 4 test datasets...")
+    metrics = trainer.evaluate_speaking_decisions(eval_dataset=None, test_datasets=test_datasets)
     
     logger.info("=" * 70)
     logger.info("EVALUATION COMPLETE")
@@ -1588,7 +2010,10 @@ def main():
         else:
             logger.info(f"W2T loss weight: {training_args.w2t_loss_weight}")
             logger.info(f"Assistant loss weight: {1.0 - training_args.w2t_loss_weight}")
+        if training_args.focal_loss:
+            logger.info(f"Focal loss enabled with gamma={training_args.focal_loss_gamma}")
         logger.info(f"Context size limit: {data_args.context_size_limit}")
+        logger.info(f"Image attention bias: {training_args.image_attention_bias}")
         logger.info(f"Speaking eval only: {training_args.speaking_eval_only}")
         if training_args.speaking_eval_only:
             logger.info(f"Speaking eval checkpoint: {training_args.speaking_eval_checkpoint or 'base model'}")
@@ -1606,7 +2031,12 @@ def main():
             logger.info("Enabling LoRA to load checkpoint for speaking evaluation")
             model_args.use_lora = True
     
-    model, processor = setup_model_and_processor(model_args, lora_args, checkpoint_to_load)
+    # Force eager attention if image attention bias is enabled
+    force_eager = training_args.image_attention_bias != 0.0
+    if force_eager:
+        logger.info(f"Image attention bias enabled (bias={training_args.image_attention_bias}), forcing eager attention")
+    
+    model, processor = setup_model_and_processor(model_args, lora_args, checkpoint_to_load, force_eager_attention=force_eager)
     model_setup_time = time.time() - model_setup_start
     logger.info(f"Model and processor setup took {model_setup_time:.2f}s")
     
@@ -1660,6 +2090,7 @@ def main():
             w2t_token_id=w2t_token_id,
             training_args=training_args,
             output_dir=training_args.output_dir,
+            data_root_dir=data_args.data_root_dir,
         )
         
         logger.info("Speaking evaluation complete. Exiting.")
