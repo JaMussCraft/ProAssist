@@ -83,6 +83,8 @@ We provide several notebooks to demonstrate:
 4. LLM-as-a-judge evaluation ([link](notebooks/llm_eval_playground.ipynb))
 5. Dataset statistics overview ([link](notebooks/data_analysis.ipynb))
 
+**Note:** Some notebooks may need to be moved to the root directory to work correctly due to relative import paths. You can also create video visualizations of ProAssist's generated dialogs or streaming inference results using `smolvlm2_streaming_v2.ipynb`.
+
 ### Training & Evaluation
 Note: the training and evaluation scripts only work with the slurm cluster currently.
 ```
