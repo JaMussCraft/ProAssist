@@ -7,10 +7,15 @@ from typing import Dict, List, Tuple, Optional
 from transformers import HfArgumentParser
 from tqdm import tqdm
 
-from mmassist.datasets.generate.dialog_simulation import ParsedVideoAnns, generate_from_annotation
+from mmassist.datasets.generate.dialog_simulation import ParsedVideoAnns, generate_from_annotation, FRAME_DESCRIPTION_PROMPT
 from mmassist.datasets.generate.auto_eval import auto_eval_generated_conversations
 from mmassist.configs.arguments import DATA_ROOT_DIR
 from mmassist.datasets.generate.openrouter_utils import LLMGenerator
+from mmassist.datasets.generate.frame_utils import (
+    load_frames_from_arrow,
+    get_frame_at_timestamp,
+    describe_frame_with_llm,
+)
 
 
 @dataclass
@@ -26,6 +31,11 @@ class EpflPreprocessArgs:
     min_ann_ratio: float = 0.5
     filter_by_llm: bool = True
     max_num_lines_per_gen: int = 20
+    # Frame incorporation options
+    use_frames: str = "none"  # Options: "none", "video", "frames", "descriptions"
+    frames_fps: float = 2.0  # FPS of the extracted frames in Arrow files
+    video_llm: str = "google/gemini-2.5-pro"  # LLM for video-based generation (Option 1)
+    frame_desc_llm: str = "google/gemini-2.5-flash"  # LLM for frame descriptions (Option 3)
 
 
 def load_epfl_annotations(annotation_dir: str) -> Tuple[List[Dict], List[Dict]]:
@@ -116,17 +126,25 @@ def parse_epfl_annotations(
     participant: str,
     session: str, 
     annotation_dir: str,
-    max_num_lines_per_gen: int = 20
+    max_num_lines_per_gen: int = 20,
+    frames_dir: Optional[str] = None,
+    use_frames: str = "none",
+    frames_fps: float = 2.0,
+    frame_desc_llm: Optional[LLMGenerator] = None,
 ) -> Optional[ParsedVideoAnns]:
     """
     Parse EPFL annotations into the format expected by the dialog generation pipeline.
     
     Args:
+        split: Split name (train or test)
         participant: Participant ID (e.g., 'YH2003')
         session: Session ID (e.g., '2023_05_17_09_08_58')
         annotation_dir: Path to the annotations directory
-        frames_dir: Path to the frames directory
         max_num_lines_per_gen: Maximum number of lines per generation clip
+        frames_dir: Directory containing frame Arrow files (for frame incorporation)
+        use_frames: Frame incorporation mode ("none", "video", "frames", "descriptions")
+        frames_fps: FPS of extracted frames
+        frame_desc_llm: LLM for generating frame descriptions (Option 3)
         
     Returns:
         ParsedVideoAnns object or None if parsing fails
@@ -137,6 +155,21 @@ def parse_epfl_annotations(
         
         # Combine annotations
         combined_annotations = combine_annotations(coarse_annotations, fine_grained_annotations)
+        
+        # Load frames if needed for description generation (Option 3)
+        frames_data = None
+        video_uid = f"{split}_{participant}_{session}"
+        if use_frames == "descriptions" and frames_dir is not None:
+            # EPFL frames follow pattern: {split}_{participant}_{session}_hololens_compressed.arrow
+            arrow_file = os.path.join(frames_dir, f"{video_uid}_hololens_compressed.arrow") # TODO: try Aoutput2 as well ot see if sdescription differ much
+            if os.path.exists(arrow_file):
+                try:
+                    frames_data = load_frames_from_arrow(arrow_file)
+                    print(f"         Loaded frames from {arrow_file}")
+                except Exception as e:
+                    print(f"         Warning: Failed to load frames from {arrow_file}: {e}")
+            else:
+                print(f"         Warning: Frame file not found: {arrow_file}")
         
         # Create step descriptions
         all_descriptions = []
@@ -152,7 +185,21 @@ def parse_epfl_annotations(
             substeps = []
             for action in ann["actions"]:
                 action_time = f"[{action['start']:.1f}s]"
-                substeps.append(f" - {action_time} {action['action']}")
+                action_text = action['action']
+                
+                # Generate frame description if using Option 3
+                frame_desc = ""
+                if use_frames == "descriptions" and frames_data is not None and frame_desc_llm is not None:
+                    try:
+                        frame = get_frame_at_timestamp(frames_data, action['start'], frames_fps)
+                        if frame is not None:
+                            frame_desc = describe_frame_with_llm(frame, frame_desc_llm, FRAME_DESCRIPTION_PROMPT)
+                            frame_desc = f" (image shows: {frame_desc})"
+                            print(frame_desc)
+                    except Exception as e:
+                        print(f"         Warning: Failed to describe frame at {action['start']}s: {e}")
+                
+                substeps.append(f" - {action_time} {action_text}{frame_desc}")
             
             all_descriptions.append({
                 "start": start_time,
@@ -245,6 +292,12 @@ def load_epfl_dataset(args: EpflPreprocessArgs) -> Dict[str, List[ParsedVideoAnn
     """
     anns_per_split = {}
     
+    # Initialize frame description LLM if needed (Option 3)
+    frame_desc_llm = None
+    if args.use_frames == "descriptions":
+        print(f"Initializing frame description LLM: {args.frame_desc_llm}")
+        frame_desc_llm = LLMGenerator.build(model_id=args.frame_desc_llm)
+    
     for split in args.splits.split(","):
         split_dir = os.path.join(args.data_dir, split)
         if not os.path.exists(split_dir):
@@ -283,7 +336,11 @@ def load_epfl_dataset(args: EpflPreprocessArgs) -> Dict[str, List[ParsedVideoAnn
                 # Parse annotations
                 parsed_ann = parse_epfl_annotations(
                     split, participant, session, annotation_dir, 
-                    args.max_num_lines_per_gen
+                    args.max_num_lines_per_gen,
+                    frames_dir=args.frames_dir if args.use_frames != "none" else None,
+                    use_frames=args.use_frames,
+                    frames_fps=args.frames_fps,
+                    frame_desc_llm=frame_desc_llm,
                 )
                 
                 if parsed_ann is not None:
@@ -359,13 +416,17 @@ def run_local_jobs(
             for ann in tqdm(anns_to_run_per_split[split], desc=f"Processing {split}"):
                 if llm is None:
                     # build llm
-                    print(f"Initializing LLM: {args.llm}")
-                    llm = LLMGenerator.build(model_id=args.llm)
+                    # For video mode (Option 1), use a more capable model
+                    model_to_use = args.video_llm if args.use_frames == "video" else args.llm
+                    print(f"Initializing LLM: {model_to_use}")
+                    llm = LLMGenerator.build(model_id=model_to_use)
                     gen_args = {
-                        "llm": args.llm,
+                        "llm": model_to_use,
                         "user_types": args.user_types,
                         "num_repeats": args.num_repeats,
                         "sampling_params": llm.default_sampling_args,
+                        "use_frames": args.use_frames,
+                        "frames_fps": args.frames_fps,
                     }
                 
                 # parse the annotation
@@ -381,6 +442,9 @@ def run_local_jobs(
                     num_repeats=args.num_repeats,
                     min_ann_ratio=args.min_ann_ratio,
                     filter_by_llm=args.filter_by_llm,
+                    frames_dir=args.frames_dir if args.use_frames != "none" else None,
+                    use_frames=args.use_frames,
+                    frames_fps=args.frames_fps,
                 )
                 
                 # save the output
@@ -400,7 +464,7 @@ def run_local_jobs(
                     if "reason_to_exclude" not in outputs_dict:
                         split_outputs[split].append(outputs_dict)
 
-                break # for now
+                # break # for now
         
         # also load the samples that have been processed before
         for ann in anns_to_load_per_split[split]:
@@ -446,11 +510,20 @@ if __name__ == "__main__":
     print("EPFL Dialog Generation - Local Mode")
     print("=" * 50)
     print(f"Data directory: {args.data_dir}")
+    print(f"Frames directory: {args.frames_dir}")
     print(f"Output directory: {args.output_dir}")
     print(f"LLM model: {args.llm}")
     print(f"Splits: {args.splits}")
     print(f"User types: {args.user_types}")
     print(f"Force rerun: {args.force_rerun}")
+    print(f"Max lines per gen: {args.max_num_lines_per_gen}")
+    print(f"Frame mode: {args.use_frames}")
+    if args.use_frames != "none":
+        print(f"  Frames FPS: {args.frames_fps}")
+        if args.use_frames == "video":
+            print(f"  Video LLM: {args.video_llm}")
+        elif args.use_frames == "descriptions":
+            print(f"  Frame description LLM: {args.frame_desc_llm}")
     print("=" * 50)
     
     # Load annotations
@@ -478,12 +551,22 @@ if __name__ == "__main__":
     print("Starting local processing...")
     start_time = time.time()
     
+    # Initialize frame description LLM if needed (Option 3)
+    frame_desc_llm = None
+    if args.use_frames == "descriptions":
+        print(f"Initializing frame description LLM for parsing: {args.frame_desc_llm}")
+        frame_desc_llm = LLMGenerator.build(model_id=args.frame_desc_llm)
+    
     split_outputs = run_local_jobs(
         args, 
         anns_per_split_dicts, 
         lambda ann, max_num_lines: parse_epfl_annotations(
             ann["split"], ann["participant"], ann["session"], 
-            ann["annotation_dir"], max_num_lines
+            ann["annotation_dir"], max_num_lines,
+            frames_dir=args.frames_dir if args.use_frames != "none" else None,
+            use_frames=args.use_frames,
+            frames_fps=args.frames_fps,
+            frame_desc_llm=frame_desc_llm,
         )
     )
     
