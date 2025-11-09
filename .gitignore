@@ -1,5 +1,5 @@
 # Byte-compiled / optimized / DLL files
-__pycache__/
+**/__pycache__/**
 *.py[cod]
 *$py.class
 
@@ -134,6 +134,13 @@ dmypy.json
 *tmp*
 
 # project-specific
-notebooks
-slurm_logs
-smolvlm*
+# notebooks
+
+# slurm jobs
+finetune_jobs*
+eval_jobs*
+merged_adapters*
+
+# video visualizations
+proassist_video*
+smolvlm2_videos*
